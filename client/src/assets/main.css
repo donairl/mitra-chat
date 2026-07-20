@@ -1,0 +1,40 @@
+@import 'tailwindcss';
+
+/* Discord-like palette (PRD 6.3) exposed as theme tokens. */
+@theme {
+  --color-blurple: #5865f2;
+  --color-blurple-dark: #4752c4;
+  --color-secondary: #4e5d94;
+  --color-bg: #36393f;
+  --color-bg-alt: #2f3136;
+  --color-bg-dark: #202225;
+  --color-bg-input: #40444b;
+  --color-txt: #dcddde;
+  --color-txt-muted: #96989d;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-txt);
+  font-family: system-ui, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Thin dark scrollbars. */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #202225;
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
