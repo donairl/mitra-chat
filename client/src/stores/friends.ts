@@ -4,12 +4,13 @@ import { friendApi } from '@/api'
 import { socket } from '@/ws/socket'
 import type { FriendRequest, User } from '@/types'
 
+// Friends store: friends list, pending requests, live online presence, and search.
 export const useFriendsStore = defineStore('friends', () => {
   const friends = ref<User[]>([])
   const requests = ref<FriendRequest[]>([])
-  const online = ref<Set<string>>(new Set())
+  const online = ref<Set<string>>(new Set()) // ids currently online, kept in sync via socket
   const searchResults = ref<User[]>([])
-  let wired = false
+  let wired = false // one-time guard so presence handlers register only once
 
   async function fetch() {
     const [f, r] = await Promise.all([friendApi.list(), friendApi.requests()])
@@ -38,13 +39,14 @@ export const useFriendsStore = defineStore('friends', () => {
 
   async function search(q: string) {
     if (q.length < 2) {
-      searchResults.value = []
+      searchResults.value = [] // skip noisy 1-char queries
       return
     }
     const { data } = await friendApi.search(q)
     searchResults.value = data
   }
 
+  // Subscribe once to presence events; they keep the `online` set current.
   function wire() {
     if (wired) return
     wired = true
@@ -52,5 +54,17 @@ export const useFriendsStore = defineStore('friends', () => {
     socket.on('user_offline', (p: any) => online.value.delete(p.user_id))
   }
 
-  return { friends, requests, online, searchResults, fetch, sendRequest, accept, reject, remove, search, wire }
+  return {
+    friends,
+    requests,
+    online,
+    searchResults,
+    fetch,
+    sendRequest,
+    accept,
+    reject,
+    remove,
+    search,
+    wire,
+  }
 })

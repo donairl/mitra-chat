@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { serverApi } from '@/api'
 import type { Server, ServerMember } from '@/types'
 
+// Servers store: the user's server list, the selected server, and its member list.
 export const useServersStore = defineStore('servers', () => {
   const servers = ref<Server[]>([])
   const currentServerId = ref<string>('')
@@ -21,6 +22,7 @@ export const useServersStore = defineStore('servers', () => {
 
   async function join(inviteCode: string) {
     const { data } = await serverApi.join(inviteCode)
+    // Avoid duplicates when re-joining a server already in the list.
     if (!servers.value.find((s) => s.id === data.id)) servers.value.push(data)
     return data
   }
@@ -32,6 +34,7 @@ export const useServersStore = defineStore('servers', () => {
     return data.invite_code
   }
 
+  // Switch active server and load its members.
   async function selectServer(id: string) {
     currentServerId.value = id
     const { data } = await serverApi.members(id)
@@ -41,7 +44,7 @@ export const useServersStore = defineStore('servers', () => {
   async function remove(id: string) {
     await serverApi.remove(id)
     servers.value = servers.value.filter((s) => s.id !== id)
-    if (currentServerId.value === id) currentServerId.value = ''
+    if (currentServerId.value === id) currentServerId.value = '' // clear stale selection
   }
 
   return { servers, currentServerId, members, fetch, create, join, invite, selectServer, remove }

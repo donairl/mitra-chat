@@ -1,11 +1,13 @@
+// Singleton WebSocket wrapper: auto-reconnect with backoff + a tiny pub/sub layer
+// so stores can subscribe to server events by message `type`.
 type Handler = (payload: any) => void
 
 class Socket {
   private ws: WebSocket | null = null
   private token = ''
   private handlers = new Map<string, Set<Handler>>()
-  private backoff = 1000
-  private closed = false
+  private backoff = 1000 // reconnect delay (ms), doubles per failed attempt
+  private closed = false // true only on intentional disconnect; suppresses reconnect
 
   connect(token: string) {
     this.token = token
@@ -18,8 +20,8 @@ class Socket {
     this.ws = new WebSocket(`${proto}://${location.host}/ws?token=${this.token}`)
 
     this.ws.onopen = () => {
-      this.backoff = 1000
-      this.emit('_open', null)
+      this.backoff = 1000 // reset backoff after a successful connection
+      this.emit('_open', null) // let stores re-join rooms / re-sync
     }
     this.ws.onmessage = (ev) => {
       try {
@@ -30,7 +32,8 @@ class Socket {
       }
     }
     this.ws.onclose = () => {
-      if (this.closed) return
+      if (this.closed) return // deliberate disconnect: do not reconnect
+      // Exponential backoff, capped at 15s, to avoid hammering the server.
       setTimeout(() => this.open(), this.backoff)
       this.backoff = Math.min(this.backoff * 2, 15000)
     }
@@ -51,6 +54,7 @@ class Socket {
     this.handlers.get(type)?.delete(handler)
   }
 
+  // Fan out an incoming event to every handler registered for its type.
   private emit(type: string, payload: any) {
     this.handlers.get(type)?.forEach((h) => h(payload))
   }

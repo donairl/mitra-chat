@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { channelApi } from '@/api'
 import type { Channel } from '@/types'
 
+// Channels store: channels for the active server plus the currently selected channel.
 export const useChannelsStore = defineStore('channels', () => {
   const channels = ref<Channel[]>([])
   const currentChannelId = ref<string>('')

@@ -1,3 +1,4 @@
+// Typed REST endpoint wrappers, grouped by resource, over the shared axios client.
 import client from './client'
 import type {
   Channel,
@@ -42,6 +43,7 @@ export const channelApi = {
 }
 
 export const messageApi = {
+  // `before` = keyset cursor (a message id); server returns the page older than it.
   history: (channelId: string, before?: string) =>
     client.get<Message[]>(`/channels/${channelId}/messages`, { params: { before } }),
   send: (b: { channel_id: string; content: string; attachment_ids?: string[] }) =>
