@@ -49,6 +49,7 @@ func migrate() error {
 		&models.Server{},
 		&models.ServerMember{},
 		&models.Channel{},
+		&models.ChannelMember{},
 		&models.Message{},
 		&models.Attachment{},
 		&models.Friend{},

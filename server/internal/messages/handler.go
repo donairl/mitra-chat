@@ -31,12 +31,18 @@ func (h *Handler) Register(r fiber.Router) {
 	r.Delete("/messages/:id", p, h.delete)
 }
 
-// canAccessChannel checks the user is a member of the channel's server.
+// canAccessChannel checks the user may access a channel: either a member of the
+// channel's server, or a participant of the channel (for DM channels).
 func canAccessChannel(channelID, userID string) bool {
 	var n int64
 	database.DB.Model(&models.Channel{}).
 		Joins("JOIN server_members sm ON sm.server_id = channels.server_id").
 		Where("channels.id = ? AND sm.user_id = ?", channelID, userID).Count(&n)
+	if n > 0 {
+		return true
+	}
+	database.DB.Model(&models.ChannelMember{}).
+		Where("channel_id = ? AND user_id = ?", channelID, userID).Count(&n)
 	return n > 0
 }
 

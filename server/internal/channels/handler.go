@@ -4,6 +4,7 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"mitrachat/server/internal/config"
 	"mitrachat/server/internal/database"
@@ -25,6 +26,8 @@ func (h *Handler) Register(r fiber.Router) {
 	p := middleware.Protected(h.cfg)
 	r.Get("/servers/:serverId/channels", p, h.list)
 	r.Post("/servers/:serverId/channels", p, h.create)
+	r.Get("/channels/dm", p, h.dmList)
+	r.Post("/channels/dm", p, h.dmOpen)
 	r.Put("/channels/:id", p, h.update)
 	r.Delete("/channels/:id", p, h.delete)
 }
@@ -114,4 +117,84 @@ func (h *Handler) delete(c *fiber.Ctx) error {
 	database.DB.Where("channel_id = ?", ch.ID).Delete(&models.Message{})
 	database.DB.Delete(&ch)
 	return utils.OK(c, fiber.Map{"message": "channel deleted"})
+}
+
+// dmChannelResp is a DM channel plus the other participant, for client display.
+type dmChannelResp struct {
+	models.Channel
+	DMUser *models.User `json:"dm_user,omitempty"`
+}
+
+type dmReq struct {
+	UserID string `json:"user_id" validate:"required"`
+}
+
+// dmOpen returns the existing 1:1 DM channel between the caller and the target
+// user, creating it (and both memberships) if it does not exist yet.
+func (h *Handler) dmOpen(c *fiber.Ctx) error {
+	var req dmReq
+	if err := c.BodyParser(&req); err != nil {
+		return utils.Error(c, fiber.StatusBadRequest, "invalid body")
+	}
+	if err := validate.Struct(req); err != nil {
+		return utils.Error(c, fiber.StatusBadRequest, err.Error())
+	}
+	uid := middleware.UserID(c)
+	if req.UserID == uid {
+		return utils.Error(c, fiber.StatusBadRequest, "cannot DM yourself")
+	}
+	var other models.User
+	if err := database.DB.First(&other, "id = ?", req.UserID).Error; err != nil {
+		return utils.Error(c, fiber.StatusNotFound, "user not found")
+	}
+
+	var existing models.Channel
+	err := database.DB.
+		Joins("JOIN channel_members cm1 ON cm1.channel_id = channels.id AND cm1.user_id = ?", uid).
+		Joins("JOIN channel_members cm2 ON cm2.channel_id = channels.id AND cm2.user_id = ?", req.UserID).
+		Where("channels.type = ?", "dm").
+		First(&existing).Error
+	if err == nil {
+		return utils.OK(c, dmChannelResp{Channel: existing, DMUser: &other})
+	}
+
+	ch := models.Channel{ID: uuid.NewString(), Name: "dm", Type: "dm"}
+	txErr := database.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&ch).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&models.ChannelMember{ID: uuid.NewString(), ChannelID: ch.ID, UserID: uid}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&models.ChannelMember{ID: uuid.NewString(), ChannelID: ch.ID, UserID: req.UserID}).Error
+	})
+	if txErr != nil {
+		return utils.Error(c, fiber.StatusInternalServerError, "could not create dm")
+	}
+	return c.Status(fiber.StatusCreated).JSON(dmChannelResp{Channel: ch, DMUser: &other})
+}
+
+// dmList returns the caller's DM channels, each with the other participant.
+func (h *Handler) dmList(c *fiber.Ctx) error {
+	uid := middleware.UserID(c)
+	var chans []models.Channel
+	database.DB.
+		Joins("JOIN channel_members cm ON cm.channel_id = channels.id AND cm.user_id = ?", uid).
+		Where("channels.type = ?", "dm").
+		Order("channels.updated_at desc").
+		Find(&chans)
+
+	resp := make([]dmChannelResp, 0, len(chans))
+	for _, ch := range chans {
+		var other models.User
+		if err := database.DB.
+			Joins("JOIN channel_members cm ON cm.user_id = users.id").
+			Where("cm.channel_id = ? AND users.id <> ?", ch.ID, uid).
+			First(&other).Error; err != nil {
+			continue
+		}
+		o := other
+		resp = append(resp, dmChannelResp{Channel: ch, DMUser: &o})
+	}
+	return utils.OK(c, resp)
 }

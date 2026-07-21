@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { useFriendsStore } from '@/stores/friends'
 
+const emit = defineEmits<{ openDm: [userId: string] }>()
 const friends = useFriendsStore()
 const tab = ref<'friends' | 'requests' | 'add'>('friends')
 const addName = ref('')
@@ -57,7 +58,13 @@ async function submitAdd() {
             :class="friends.online.has(f.id) ? 'bg-green-500' : 'bg-gray-500'"
           ></span>
         </div>
-        <span class="text-txt">{{ f.username }}</span>
+        <button
+          @click="emit('openDm', f.id)"
+          class="text-txt hover:underline"
+          title="Open direct message"
+        >
+          {{ f.username }}
+        </button>
         <button
           @click="friends.remove(f.id)"
           class="ml-auto text-xs text-txt-muted hover:text-red-400"

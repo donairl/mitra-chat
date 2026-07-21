@@ -4,6 +4,7 @@ import { useServersStore } from '@/stores/servers'
 import { useChannelsStore } from '@/stores/channels'
 import { useAuthStore } from '@/stores/auth'
 import CreateChannelModal from '@/components/CreateChannelModal.vue'
+import InviteServerModal from '@/components/InviteServerModal.vue'
 
 defineProps<{ activeChannel: string }>()
 defineEmits<{ open: [id: string] }>()
@@ -12,6 +13,7 @@ const servers = useServersStore()
 const channels = useChannelsStore()
 const auth = useAuthStore()
 const showCreate = ref(false)
+const showInvite = ref(false)
 
 const server = computed(() => servers.servers.find((s) => s.id === servers.currentServerId))
 const isOwner = computed(() => server.value?.owner_id === auth.user?.id)
@@ -19,8 +21,16 @@ const isOwner = computed(() => server.value?.owner_id === auth.user?.id)
 
 <template>
   <aside class="flex w-60 flex-col bg-bg-alt">
-    <div class="flex h-12 items-center border-b border-black/30 px-4 font-semibold text-white shadow-sm">
+    <div class="flex h-12 items-center justify-between border-b border-black/30 px-4 font-semibold text-white shadow-sm">
       <span class="truncate">{{ server?.name }}</span>
+      <button
+        v-if="server"
+        @click="showInvite = true"
+        class="ml-2 shrink-0 text-txt-muted hover:text-white"
+        title="Invite people"
+      >
+        ＋👤
+      </button>
     </div>
 
     <div class="flex-1 overflow-y-auto px-2 py-3">
@@ -61,5 +71,6 @@ const isOwner = computed(() => server.value?.owner_id === auth.user?.id)
     </div>
 
     <CreateChannelModal v-if="showCreate" :server-id="servers.currentServerId" @close="showCreate = false" />
+    <InviteServerModal v-if="showInvite" :server-id="servers.currentServerId" @close="showInvite = false" />
   </aside>
 </template>

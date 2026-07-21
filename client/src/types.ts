@@ -22,7 +22,8 @@ export interface Channel {
   name: string
   type: string
   topic?: string
-  server_id: string
+  server_id?: string
+  dm_user?: User
 }
 
 export interface Attachment {

@@ -37,6 +37,8 @@ export const channelApi = {
     client.post<Channel>(`/servers/${serverId}/channels`, b),
   update: (id: string, b: object) => client.put<Channel>(`/channels/${id}`, b),
   remove: (id: string) => client.delete(`/channels/${id}`),
+  dmList: () => client.get<Channel[]>('/channels/dm'),
+  dmOpen: (user_id: string) => client.post<Channel>('/channels/dm', { user_id }),
 }
 
 export const messageApi = {

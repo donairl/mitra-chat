@@ -25,6 +25,13 @@ export const useServersStore = defineStore('servers', () => {
     return data
   }
 
+  async function invite(id: string) {
+    const { data } = await serverApi.invite(id)
+    const s = servers.value.find((x) => x.id === id)
+    if (s) s.invite_code = data.invite_code
+    return data.invite_code
+  }
+
   async function selectServer(id: string) {
     currentServerId.value = id
     const { data } = await serverApi.members(id)
@@ -37,5 +44,5 @@ export const useServersStore = defineStore('servers', () => {
     if (currentServerId.value === id) currentServerId.value = ''
   }
 
-  return { servers, currentServerId, members, fetch, create, join, selectServer, remove }
+  return { servers, currentServerId, members, fetch, create, join, invite, selectServer, remove }
 })
