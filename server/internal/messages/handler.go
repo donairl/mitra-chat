@@ -116,8 +116,14 @@ func (h *Handler) delete(c *fiber.Ctx) error {
 
 // messageError maps ws edit/delete errors to HTTP responses.
 func messageError(c *fiber.Ctx, err error) error {
-	if errors.Is(err, ws.ErrForbidden) {
+	switch {
+	case errors.Is(err, ws.ErrForbidden):
 		return utils.Error(c, fiber.StatusForbidden, "insufficient permissions")
+	case errors.Is(err, ws.ErrNotFound):
+		return utils.Error(c, fiber.StatusNotFound, "message not found")
+	case errors.Is(err, ws.ErrEmptyContent), errors.Is(err, ws.ErrContentTooLong):
+		return utils.Error(c, fiber.StatusBadRequest, err.Error())
+	default:
+		return utils.Error(c, fiber.StatusInternalServerError, "could not save message")
 	}
-	return utils.Error(c, fiber.StatusNotFound, "message not found")
 }

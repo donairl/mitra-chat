@@ -2,6 +2,7 @@ package ws
 
 import (
 	"log"
+	"sync"
 	"time"
 
 	"github.com/gofiber/contrib/websocket"
@@ -23,7 +24,13 @@ type Client struct {
 	userID   string
 	username string
 	rooms    map[string]bool
-	send     chan []byte
+
+	// send queues outgoing frames for writePump. sendMu guards closed and
+	// every send on or close of the channel, so it is closed at most once and
+	// never written to afterwards, however many broadcasters race on it.
+	sendMu sync.Mutex
+	closed bool
+	send   chan []byte
 }
 
 // Serve upgrades a connection into a managed client and runs its pumps.
@@ -49,11 +56,20 @@ func Serve(conn *websocket.Conn) {
 	c.readPump()
 }
 
+// trySend queues a frame without blocking. A consumer whose buffer is full is
+// dropped by closing its queue, which makes writePump close the connection;
+// frames sent after that are discarded. Safe for concurrent use.
 func (c *Client) trySend(data []byte) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.closed {
+		return
+	}
 	select {
 	case c.send <- data:
 	default:
 		// slow consumer: drop connection
+		c.closed = true
 		close(c.send)
 	}
 }

@@ -3,9 +3,12 @@ package ws
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"mitrachat/server/internal/database"
 	"mitrachat/server/internal/models"
@@ -41,6 +44,14 @@ func (c *Client) handleMessage(raw []byte) {
 				return
 			}
 			H.joinRoom(c, p.ChannelID)
+			// Check again now that c is in the room. A revoke that landed
+			// between the check above and the join ran RecheckRooms before c
+			// was in the room, so nothing else would evict it.
+			if !perms.ChannelAccess(p.ChannelID, c.userID).CanView {
+				H.leaveRoom(c, p.ChannelID)
+				c.sendError("not_found", "channel not found", p.ChannelID)
+				return
+			}
 			H.BroadcastToChannel(p.ChannelID, out("user_joined", map[string]any{
 				"user_id": c.userID, "username": c.username, "channel_id": p.ChannelID,
 			}), c)
@@ -50,10 +61,13 @@ func (c *Client) handleMessage(raw []byte) {
 			ChannelID string `json:"channel_id"`
 		}
 		if json.Unmarshal(env.Payload, &p) == nil && p.ChannelID != "" {
-			H.leaveRoom(c, p.ChannelID)
-			H.BroadcastToChannel(p.ChannelID, out("user_left", map[string]any{
-				"user_id": c.userID, "username": c.username, "channel_id": p.ChannelID,
-			}), c)
+			// Only announce a departure from a room the client was in, so
+			// nobody can spoof user_left in a channel they never joined.
+			if H.leaveRoom(c, p.ChannelID) {
+				H.BroadcastToChannel(p.ChannelID, out("user_left", map[string]any{
+					"user_id": c.userID, "username": c.username, "channel_id": p.ChannelID,
+				}), c)
+			}
 		}
 	case "send_message":
 		var p struct {
@@ -68,10 +82,10 @@ func (c *Client) handleMessage(raw []byte) {
 				c.sendError("not_found", "channel not found", p.ChannelID)
 			case !a.CanPost:
 				c.sendError("forbidden", "insufficient permissions", p.ChannelID)
-			case p.Content == "" && len(p.AttachmentIDs) == 0:
-				c.sendError("bad_request", "empty message", p.ChannelID)
 			default:
-				CreateAndBroadcast(c.userID, p.ChannelID, p.Content, p.AttachmentIDs)
+				if _, err := CreateAndBroadcast(c.userID, p.ChannelID, p.Content, p.AttachmentIDs); err != nil {
+					c.sendMessageError(err, p.ChannelID)
+				}
 			}
 		}
 	case "edit_message":
@@ -81,7 +95,7 @@ func (c *Client) handleMessage(raw []byte) {
 		}
 		if json.Unmarshal(env.Payload, &p) == nil {
 			if _, err := EditAndBroadcast(c.userID, p.MessageID, p.Content); err != nil {
-				c.sendMessageError(err)
+				c.sendMessageError(err, "")
 			}
 		}
 	case "delete_message":
@@ -90,7 +104,7 @@ func (c *Client) handleMessage(raw []byte) {
 		}
 		if json.Unmarshal(env.Payload, &p) == nil {
 			if err := DeleteAndBroadcast(c.userID, p.MessageID); err != nil {
-				c.sendMessageError(err)
+				c.sendMessageError(err, "")
 			}
 		}
 	case "typing_start", "typing_stop":
@@ -121,18 +135,46 @@ func (c *Client) sendError(code, message, channelID string) {
 	}
 }
 
-// sendMessageError maps an edit/delete failure to an error frame.
-func (c *Client) sendMessageError(err error) {
-	if errors.Is(err, ErrForbidden) {
-		c.sendError("forbidden", "insufficient permissions", "")
-		return
+// sendMessageError maps a send/edit/delete failure to an error frame.
+func (c *Client) sendMessageError(err error, channelID string) {
+	switch {
+	case errors.Is(err, ErrForbidden):
+		c.sendError("forbidden", "insufficient permissions", channelID)
+	case errors.Is(err, ErrNotFound):
+		c.sendError("not_found", "message not found", channelID)
+	case errors.Is(err, ErrEmptyContent):
+		c.sendError("bad_request", "empty message", channelID)
+	case errors.Is(err, ErrContentTooLong):
+		c.sendError("bad_request", "message too long", channelID)
+	default:
+		c.sendError("internal_error", "could not save message", channelID)
 	}
-	c.sendError("not_found", "message not found", "")
+}
+
+// MaxContentLen is the longest message text, in characters. It matches the
+// max=4000 rule the HTTP handlers validate, so both paths accept the same input.
+const MaxContentLen = 4000
+
+// checkContent applies the HTTP handlers' content rules: text is required
+// unless allowEmpty (a new message with attachments) and is capped at
+// MaxContentLen characters.
+func checkContent(content string, allowEmpty bool) error {
+	if content == "" && !allowEmpty {
+		return ErrEmptyContent
+	}
+	if utf8.RuneCountInString(content) > MaxContentLen {
+		return ErrContentTooLong
+	}
+	return nil
 }
 
 // CreateAndBroadcast persists a message (with optional attachments) and
 // broadcasts it. Callers must check perms.ChannelAccess(...).CanPost first.
+// It returns ErrEmptyContent or ErrContentTooLong for invalid text.
 func CreateAndBroadcast(userID, channelID, content string, attachmentIDs []string) (*models.Message, error) {
+	if err := checkContent(content, len(attachmentIDs) > 0); err != nil {
+		return nil, err
+	}
 	msg := models.Message{
 		ID:        uuid.NewString(),
 		Content:   content,
@@ -157,8 +199,13 @@ func CreateAndBroadcast(userID, channelID, content string, attachmentIDs []strin
 // EditAndBroadcast updates the caller's own message and broadcasts the change.
 // It returns ErrNotFound when the message is missing or its channel is hidden
 // from the caller, and ErrForbidden when the caller is not the author or can
-// no longer post in the channel.
+// no longer post in the channel. Invalid text is rejected first, like the HTTP
+// handler does, with ErrEmptyContent or ErrContentTooLong. A failed database
+// update is returned and nothing is broadcast.
 func EditAndBroadcast(userID, messageID, content string) (*models.Message, error) {
+	if err := checkContent(content, false); err != nil {
+		return nil, err
+	}
 	var msg models.Message
 	if err := database.DB.First(&msg, "id = ?", messageID).Error; err != nil {
 		return nil, ErrNotFound
@@ -174,9 +221,11 @@ func EditAndBroadcast(userID, messageID, content string) (*models.Message, error
 	msg.Content = content
 	msg.IsEdited = true
 	msg.EditedAt = &now
-	database.DB.Model(&msg).Updates(map[string]any{
+	if err := database.DB.Model(&msg).Updates(map[string]any{
 		"content": content, "is_edited": true, "edited_at": now,
-	})
+	}).Error; err != nil {
+		return nil, fmt.Errorf("update message: %w", err)
+	}
 	H.BroadcastToChannel(msg.ChannelID, out("message_edited", map[string]any{
 		"message_id": msg.ID, "channel_id": msg.ChannelID,
 		"content": content, "is_edited": true, "edited_at": now,
@@ -200,8 +249,15 @@ func DeleteAndBroadcast(userID, messageID string) error {
 	if msg.UserID != userID && !moderator {
 		return ErrForbidden
 	}
-	database.DB.Delete(&msg)
-	database.DB.Where("message_id = ?", msg.ID).Delete(&models.Attachment{})
+	err := database.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&msg).Error; err != nil {
+			return err
+		}
+		return tx.Where("message_id = ?", msg.ID).Delete(&models.Attachment{}).Error
+	})
+	if err != nil {
+		return fmt.Errorf("delete message: %w", err)
+	}
 	H.BroadcastToChannel(msg.ChannelID, out("message_deleted", map[string]any{
 		"message_id": msg.ID, "channel_id": msg.ChannelID,
 	}), nil)

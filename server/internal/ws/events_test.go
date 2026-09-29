@@ -1,12 +1,18 @@
 package ws
 
 import (
+	"errors"
+	"strings"
 	"testing"
+
+	"gorm.io/gorm"
 
 	"mitrachat/server/internal/database"
 	"mitrachat/server/internal/models"
 	"mitrachat/server/internal/testutil"
 )
+
+var errTestDB = errors.New("simulated database failure")
 
 func setupWS(t *testing.T) testutil.Guild {
 	t.Helper()
@@ -206,4 +212,181 @@ func firstMessageID(channelID string) string {
 	var m models.Message
 	database.DB.First(&m, "channel_id = ?", channelID)
 	return m.ID
+}
+
+func TestJoinRoomRevokedAfterCheckIsEvicted(t *testing.T) {
+	g := setupWS(t)
+	listener, joiner := newTestClient(g.Owner), newTestClient(g.Admin)
+	H.joinRoom(listener, g.AdminOnly)
+
+	// Demote the joiner right after the first access check has read their
+	// role, i.e. between the check and the join. The revoke's RecheckRooms
+	// would have missed a client that was not in the room yet.
+	fired := false
+	database.DB.Callback().Query().After("gorm:query").Register("test:demote_after_check", func(tx *gorm.DB) {
+		if fired || tx.Statement.Table != "server_members" {
+			return
+		}
+		fired = true
+		tx.Session(&gorm.Session{NewDB: true}).Model(&models.ServerMember{}).
+			Where("server_id = ? AND user_id = ?", g.ServerID, g.Admin).Update("role", "member")
+	})
+
+	dispatch(joiner, "join_room", map[string]string{"channel_id": g.AdminOnly})
+
+	if !fired {
+		t.Fatal("test hook never ran")
+	}
+	if joiner.rooms[g.AdminOnly] || H.rooms[g.AdminOnly][joiner] {
+		t.Fatal("demoted user stayed in the admin-only room")
+	}
+	frames := drain(joiner)
+	if p := firstOf(frames, "error"); p == nil || p["code"] != "not_found" || p["channel_id"] != g.AdminOnly {
+		t.Fatalf("error frame = %v", p)
+	}
+	if firstOf(drain(listener), "user_joined") != nil {
+		t.Fatal("user_joined was broadcast for a user who lost access")
+	}
+}
+
+func TestJoinRoomBroadcastsUserJoined(t *testing.T) {
+	g := setupWS(t)
+	listener, joiner := newTestClient(g.Mod), newTestClient(g.Member)
+	H.joinRoom(listener, g.Open)
+
+	dispatch(joiner, "join_room", map[string]string{"channel_id": g.Open})
+
+	p := firstOf(drain(listener), "user_joined")
+	if p == nil || p["user_id"] != g.Member {
+		t.Fatalf("user_joined = %v", p)
+	}
+}
+
+func TestLeaveRoomBroadcastsOnlyWhenInRoom(t *testing.T) {
+	g := setupWS(t)
+	listener, leaver := newTestClient(g.Mod), newTestClient(g.Member)
+	H.joinRoom(listener, g.Open)
+
+	dispatch(leaver, "leave_room", map[string]string{"channel_id": g.Open})
+	if firstOf(drain(listener), "user_left") != nil {
+		t.Fatal("user_left was broadcast for a client that was never in the room")
+	}
+
+	H.joinRoom(leaver, g.Open)
+	dispatch(leaver, "leave_room", map[string]string{"channel_id": g.Open})
+	if p := firstOf(drain(listener), "user_left"); p == nil || p["user_id"] != g.Member {
+		t.Fatalf("user_left = %v", p)
+	}
+	if leaver.rooms[g.Open] {
+		t.Fatal("leaver is still in the room")
+	}
+}
+
+func TestSendMessageLengthLimit(t *testing.T) {
+	g := setupWS(t)
+	c := newTestClient(g.Member)
+
+	// The limit counts characters, like the HTTP validator: 4000 two-byte
+	// runes are accepted, 4001 are not.
+	dispatch(c, "send_message", map[string]any{"channel_id": g.Open, "content": strings.Repeat("é", 4000)})
+	if n := countMessages(g.Open); n != 1 {
+		t.Fatalf("messages after a 4000-character send = %d, want 1", n)
+	}
+	drain(c)
+
+	dispatch(c, "send_message", map[string]any{"channel_id": g.Open, "content": strings.Repeat("é", 4001)})
+	if n := countMessages(g.Open); n != 1 {
+		t.Fatalf("messages after a 4001-character send = %d, want 1", n)
+	}
+	expectError(t, c, "bad_request")
+}
+
+func TestEditMessageValidatesContent(t *testing.T) {
+	g := setupWS(t)
+	msg := testutil.AddMessage(t, g.Open, g.Member, "old")
+	c := newTestClient(g.Member)
+	cases := map[string]string{"empty": "", "too long": strings.Repeat("x", 4001)}
+	for name, content := range cases {
+		dispatch(c, "edit_message", map[string]string{"message_id": msg, "content": content})
+		var m models.Message
+		database.DB.First(&m, "id = ?", msg)
+		if m.Content != "old" {
+			t.Fatalf("%s edit changed the message to %d characters", name, len(m.Content))
+		}
+		expectError(t, c, "bad_request")
+	}
+
+	dispatch(c, "edit_message", map[string]string{"message_id": msg, "content": strings.Repeat("x", 4000)})
+	var m models.Message
+	database.DB.First(&m, "id = ?", msg)
+	if len(m.Content) != 4000 {
+		t.Fatalf("a 4000-character edit was refused (content length %d)", len(m.Content))
+	}
+}
+
+// failWrites makes every write of the given kind ("update" or "delete") on the
+// messages table fail, so tests can exercise the database error paths.
+func failWrites(t *testing.T, kind string) {
+	t.Helper()
+	fail := func(tx *gorm.DB) {
+		if tx.Statement.Table == "messages" {
+			tx.AddError(errTestDB)
+		}
+	}
+	switch kind {
+	case "update":
+		database.DB.Callback().Update().Before("gorm:update").Register("test:fail_update", fail)
+	case "delete":
+		database.DB.Callback().Delete().Before("gorm:delete").Register("test:fail_delete", fail)
+	}
+}
+
+func TestEditMessageDBErrorSkipsBroadcast(t *testing.T) {
+	g := setupWS(t)
+	msg := testutil.AddMessage(t, g.Open, g.Member, "old")
+	author, listener := newTestClient(g.Member), newTestClient(g.Mod)
+	H.joinRoom(listener, g.Open)
+	failWrites(t, "update")
+
+	dispatch(author, "edit_message", map[string]string{"message_id": msg, "content": "new"})
+
+	if firstOf(drain(listener), "message_edited") != nil {
+		t.Fatal("message_edited was broadcast although the update failed")
+	}
+	expectError(t, author, "internal_error")
+}
+
+func TestDeleteMessageDBErrorSkipsBroadcast(t *testing.T) {
+	g := setupWS(t)
+	msg := testutil.AddMessage(t, g.Open, g.Member, "keep")
+	author, listener := newTestClient(g.Member), newTestClient(g.Mod)
+	H.joinRoom(listener, g.Open)
+	failWrites(t, "delete")
+
+	dispatch(author, "delete_message", map[string]string{"message_id": msg})
+
+	if firstOf(drain(listener), "message_deleted") != nil {
+		t.Fatal("message_deleted was broadcast although the delete failed")
+	}
+	if n := countMessages(g.Open); n != 1 {
+		t.Fatalf("messages = %d, want 1", n)
+	}
+	expectError(t, author, "internal_error")
+}
+
+func TestEditAndDeleteHiddenChannelMessageIsNotFound(t *testing.T) {
+	g := setupWS(t)
+	msg := testutil.AddMessage(t, g.Staff, g.Mod, "staff only")
+	c := newTestClient(g.Member)
+
+	dispatch(c, "edit_message", map[string]string{"message_id": msg, "content": "hijack"})
+	expectError(t, c, "not_found")
+	dispatch(c, "delete_message", map[string]string{"message_id": msg})
+	expectError(t, c, "not_found")
+
+	var m models.Message
+	database.DB.First(&m, "id = ?", msg)
+	if m.Content != "staff only" {
+		t.Fatal("a member changed a message in a channel they cannot see")
+	}
 }

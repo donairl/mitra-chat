@@ -72,10 +72,13 @@ func (h *Hub) joinRoom(c *Client, channelID string) {
 	c.rooms[channelID] = true
 }
 
-func (h *Hub) leaveRoom(c *Client, channelID string) {
+// leaveRoom removes c from a room and reports whether it was in it.
+func (h *Hub) leaveRoom(c *Client, channelID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	was := h.rooms[channelID][c]
 	h.removeFromRoom(c, channelID)
+	return was
 }
 
 // removeFromRoom drops c from a room. The caller must hold h.mu for writing.
