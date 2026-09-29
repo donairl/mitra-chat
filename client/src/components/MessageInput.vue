@@ -20,6 +20,7 @@ const placeholder = computed(() =>
 
 const text = ref('')
 const pending = ref<Attachment[]>([])
+const sending = ref(false) // a message is awaiting the server's confirmation
 const fileInput = ref<HTMLInputElement | null>(null)
 let typingTimer: number | undefined
 let isTyping = false
@@ -50,8 +51,15 @@ async function pickFile(e: Event) {
 
 async function send() {
   const content = text.value.trim()
-  if (!allowed.value || (!content && pending.value.length === 0)) return
-  await messages.send(content, pending.value.map((a) => a.id))
+  if (sending.value || !allowed.value || (!content && pending.value.length === 0)) return
+  sending.value = true
+  let ok: boolean
+  try {
+    ok = await messages.send(content, pending.value.map((a) => a.id))
+  } finally {
+    sending.value = false
+  }
+  if (!ok) return // refused or unconfirmed: keep the draft and attachments so the user can retry
   text.value = ''
   pending.value = []
   isTyping = false
@@ -61,6 +69,20 @@ async function send() {
 
 <template>
   <div class="px-4 pb-4">
+    <div
+      v-if="messages.lastError"
+      role="alert"
+      class="mb-2 flex items-center justify-between rounded bg-red-500/20 px-3 py-1.5 text-sm text-red-200"
+    >
+      <span>{{ messages.lastError }}</span>
+      <button
+        class="ml-4 text-red-200 hover:text-white"
+        aria-label="Dismiss error"
+        @click="messages.lastError = ''"
+      >
+        ✕
+      </button>
+    </div>
     <div v-if="pending.length" class="mb-2 flex gap-2">
       <div
         v-for="a in pending"
@@ -88,6 +110,7 @@ async function send() {
         @keydown.enter.exact.prevent="send"
         :placeholder="placeholder"
         :disabled="!allowed"
+        maxlength="4000"
         rows="1"
         class="max-h-40 flex-1 resize-none bg-transparent text-txt outline-none placeholder:text-txt-muted disabled:cursor-not-allowed"
       ></textarea>
