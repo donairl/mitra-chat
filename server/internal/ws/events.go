@@ -2,12 +2,14 @@ package ws
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
 
 	"mitrachat/server/internal/database"
 	"mitrachat/server/internal/models"
+	"mitrachat/server/internal/perms"
 )
 
 // Envelope is the wire format for all websocket messages.
@@ -21,6 +23,8 @@ func out(t string, payload any) map[string]any {
 	return map[string]any{"type": t, "payload": payload}
 }
 
+// handleMessage dispatches one client frame. Every event is checked with the
+// perms package, the same way the HTTP handlers are.
 func (c *Client) handleMessage(raw []byte) {
 	var env Envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -32,6 +36,10 @@ func (c *Client) handleMessage(raw []byte) {
 			ChannelID string `json:"channel_id"`
 		}
 		if json.Unmarshal(env.Payload, &p) == nil && p.ChannelID != "" {
+			if !perms.ChannelAccess(p.ChannelID, c.userID).CanView {
+				c.sendError("not_found", "channel not found", p.ChannelID)
+				return
+			}
 			H.joinRoom(c, p.ChannelID)
 			H.BroadcastToChannel(p.ChannelID, out("user_joined", map[string]any{
 				"user_id": c.userID, "username": c.username, "channel_id": p.ChannelID,
@@ -54,7 +62,17 @@ func (c *Client) handleMessage(raw []byte) {
 			AttachmentIDs []string `json:"attachment_ids"`
 		}
 		if json.Unmarshal(env.Payload, &p) == nil && p.ChannelID != "" {
-			CreateAndBroadcast(c.userID, p.ChannelID, p.Content, p.AttachmentIDs)
+			a := perms.ChannelAccess(p.ChannelID, c.userID)
+			switch {
+			case !a.CanView:
+				c.sendError("not_found", "channel not found", p.ChannelID)
+			case !a.CanPost:
+				c.sendError("forbidden", "insufficient permissions", p.ChannelID)
+			case p.Content == "" && len(p.AttachmentIDs) == 0:
+				c.sendError("bad_request", "empty message", p.ChannelID)
+			default:
+				CreateAndBroadcast(c.userID, p.ChannelID, p.Content, p.AttachmentIDs)
+			}
 		}
 	case "edit_message":
 		var p struct {
@@ -62,20 +80,25 @@ func (c *Client) handleMessage(raw []byte) {
 			Content   string `json:"content"`
 		}
 		if json.Unmarshal(env.Payload, &p) == nil {
-			EditAndBroadcast(c.userID, p.MessageID, p.Content)
+			if _, err := EditAndBroadcast(c.userID, p.MessageID, p.Content); err != nil {
+				c.sendMessageError(err)
+			}
 		}
 	case "delete_message":
 		var p struct {
 			MessageID string `json:"message_id"`
 		}
 		if json.Unmarshal(env.Payload, &p) == nil {
-			DeleteAndBroadcast(c.userID, p.MessageID)
+			if err := DeleteAndBroadcast(c.userID, p.MessageID); err != nil {
+				c.sendMessageError(err)
+			}
 		}
 	case "typing_start", "typing_stop":
 		var p struct {
 			ChannelID string `json:"channel_id"`
 		}
-		if json.Unmarshal(env.Payload, &p) == nil && p.ChannelID != "" {
+		if json.Unmarshal(env.Payload, &p) == nil && p.ChannelID != "" &&
+			perms.ChannelAccess(p.ChannelID, c.userID).CanPost {
 			t := "typing"
 			if env.Type == "typing_stop" {
 				t = "typing_stop"
@@ -87,7 +110,28 @@ func (c *Client) handleMessage(raw []byte) {
 	}
 }
 
-// CreateAndBroadcast persists a message (with optional attachments) and broadcasts it.
+// sendError tells only this connection that its request was refused.
+func (c *Client) sendError(code, message, channelID string) {
+	p := map[string]any{"code": code, "message": message}
+	if channelID != "" {
+		p["channel_id"] = channelID
+	}
+	if data, err := json.Marshal(out("error", p)); err == nil {
+		c.trySend(data)
+	}
+}
+
+// sendMessageError maps an edit/delete failure to an error frame.
+func (c *Client) sendMessageError(err error) {
+	if errors.Is(err, ErrForbidden) {
+		c.sendError("forbidden", "insufficient permissions", "")
+		return
+	}
+	c.sendError("not_found", "message not found", "")
+}
+
+// CreateAndBroadcast persists a message (with optional attachments) and
+// broadcasts it. Callers must check perms.ChannelAccess(...).CanPost first.
 func CreateAndBroadcast(userID, channelID, content string, attachmentIDs []string) (*models.Message, error) {
 	msg := models.Message{
 		ID:        uuid.NewString(),
@@ -110,13 +154,20 @@ func CreateAndBroadcast(userID, channelID, content string, attachmentIDs []strin
 	return &msg, nil
 }
 
-// EditAndBroadcast updates a message the user owns and broadcasts the change.
+// EditAndBroadcast updates the caller's own message and broadcasts the change.
+// It returns ErrNotFound when the message is missing or its channel is hidden
+// from the caller, and ErrForbidden when the caller is not the author or can
+// no longer post in the channel.
 func EditAndBroadcast(userID, messageID, content string) (*models.Message, error) {
 	var msg models.Message
 	if err := database.DB.First(&msg, "id = ?", messageID).Error; err != nil {
-		return nil, err
+		return nil, ErrNotFound
 	}
-	if msg.UserID != userID {
+	a := perms.ChannelAccess(msg.ChannelID, userID)
+	if !a.CanView {
+		return nil, ErrNotFound
+	}
+	if msg.UserID != userID || !a.CanPost {
 		return nil, ErrForbidden
 	}
 	now := time.Now()
@@ -133,13 +184,20 @@ func EditAndBroadcast(userID, messageID, content string) (*models.Message, error
 	return &msg, nil
 }
 
-// DeleteAndBroadcast removes a message the user owns and broadcasts the deletion.
+// DeleteAndBroadcast removes a message and broadcasts the deletion. Authors may
+// delete their own messages; moderators and above may delete any message in a
+// server channel they can view. Errors match EditAndBroadcast.
 func DeleteAndBroadcast(userID, messageID string) error {
 	var msg models.Message
 	if err := database.DB.First(&msg, "id = ?", messageID).Error; err != nil {
-		return err
+		return ErrNotFound
 	}
-	if msg.UserID != userID {
+	a := perms.ChannelAccess(msg.ChannelID, userID)
+	if !a.CanView {
+		return ErrNotFound
+	}
+	moderator := a.ServerID != "" && perms.Can(a.Tier, perms.CapDeleteAnyMessage)
+	if msg.UserID != userID && !moderator {
 		return ErrForbidden
 	}
 	database.DB.Delete(&msg)
