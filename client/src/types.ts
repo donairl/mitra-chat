@@ -1,3 +1,6 @@
+// Server role, lowest first. Mirrors server/internal/perms tiers.
+export type Role = 'member' | 'moderator' | 'admin' | 'owner'
+
 export interface User {
   id: string
   username: string
@@ -23,6 +26,8 @@ export interface Channel {
   type: string
   topic?: string
   server_id?: string
+  min_view_role?: Role // lowest role that can read (server channels only)
+  min_post_role?: Role // lowest role that can post (server channels only)
   dm_user?: User
 }
 
@@ -68,6 +73,15 @@ export interface ServerMember {
   id: string
   server_id: string
   user_id: string
-  role: string
+  role: Role
+  user?: User
+}
+
+export interface ServerBan {
+  id: string
+  server_id: string
+  user_id: string
+  banned_by: string
+  created_at: string
   user?: User
 }
