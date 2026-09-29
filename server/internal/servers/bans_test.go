@@ -3,6 +3,7 @@ package servers_test
 import (
 	"testing"
 
+	"mitrachat/server/internal/database"
 	"mitrachat/server/internal/models"
 	"mitrachat/server/internal/testutil"
 )
@@ -75,5 +76,36 @@ func TestUnbanMissingIs404(t *testing.T) {
 	path := "/api/servers/" + g.ServerID + "/bans/" + g.Stranger
 	if status, _ := testutil.Do(t, newApp(), "DELETE", path, testutil.Token(t, g.Mod), nil); status != 404 {
 		t.Fatalf("status %d, want 404", status)
+	}
+}
+
+func TestBanEndpointsNeedModerator(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	app := newApp()
+	bans := "/api/servers/" + g.ServerID + "/bans"
+	// g.Member stays a member; someone else is banned so an unban has a target.
+	target := testutil.SeedUser(t, "victim")
+	testutil.AddMember(t, g.ServerID, target, "member")
+	if status, body := testutil.Do(t, app, "POST", bans, testutil.Token(t, g.Mod), map[string]any{"user_id": target}); status != 201 {
+		t.Fatalf("setup ban: %d (%s)", status, body)
+	}
+
+	for _, user := range []string{"member", "stranger"} {
+		tok := testutil.Token(t, g.User(user))
+		if status, _ := testutil.Do(t, app, "GET", bans, tok, nil); status != 403 {
+			t.Errorf("%s lists bans: %d, want 403", user, status)
+		}
+		if status, _ := testutil.Do(t, app, "DELETE", bans+"/"+target, tok, nil); status != 403 {
+			t.Errorf("%s unbans: %d, want 403", user, status)
+		}
+		if status, _ := testutil.Do(t, app, "POST", bans, tok, map[string]any{"user_id": g.Mod}); status != 403 {
+			t.Errorf("%s bans: %d, want 403", user, status)
+		}
+	}
+	var n int64
+	database.DB.Model(&models.ServerBan{}).Where("server_id = ?", g.ServerID).Count(&n)
+	if n != 1 {
+		t.Fatalf("bans = %d, want the original 1 untouched", n)
 	}
 }

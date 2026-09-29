@@ -1,7 +1,6 @@
 package ws
 
 import (
-	"errors"
 	"strings"
 	"testing"
 
@@ -11,8 +10,6 @@ import (
 	"mitrachat/server/internal/models"
 	"mitrachat/server/internal/testutil"
 )
-
-var errTestDB = errors.New("simulated database failure")
 
 func setupWS(t *testing.T) testutil.Guild {
 	t.Helper()
@@ -324,29 +321,12 @@ func TestEditMessageValidatesContent(t *testing.T) {
 	}
 }
 
-// failWrites makes every write of the given kind ("update" or "delete") on the
-// messages table fail, so tests can exercise the database error paths.
-func failWrites(t *testing.T, kind string) {
-	t.Helper()
-	fail := func(tx *gorm.DB) {
-		if tx.Statement.Table == "messages" {
-			tx.AddError(errTestDB)
-		}
-	}
-	switch kind {
-	case "update":
-		database.DB.Callback().Update().Before("gorm:update").Register("test:fail_update", fail)
-	case "delete":
-		database.DB.Callback().Delete().Before("gorm:delete").Register("test:fail_delete", fail)
-	}
-}
-
 func TestEditMessageDBErrorSkipsBroadcast(t *testing.T) {
 	g := setupWS(t)
 	msg := testutil.AddMessage(t, g.Open, g.Member, "old")
 	author, listener := newTestClient(g.Member), newTestClient(g.Mod)
 	H.joinRoom(listener, g.Open)
-	failWrites(t, "update")
+	testutil.FailOn("update", "messages", nil)
 
 	dispatch(author, "edit_message", map[string]string{"message_id": msg, "content": "new"})
 
@@ -361,7 +341,7 @@ func TestDeleteMessageDBErrorSkipsBroadcast(t *testing.T) {
 	msg := testutil.AddMessage(t, g.Open, g.Member, "keep")
 	author, listener := newTestClient(g.Member), newTestClient(g.Mod)
 	H.joinRoom(listener, g.Open)
-	failWrites(t, "delete")
+	testutil.FailOn("delete", "messages", nil)
 
 	dispatch(author, "delete_message", map[string]string{"message_id": msg})
 

@@ -11,12 +11,23 @@ import (
 	"mitrachat/server/internal/models"
 	"mitrachat/server/internal/servers"
 	"mitrachat/server/internal/testutil"
+	"mitrachat/server/internal/ws"
 )
 
 func newApp() *fiber.App {
 	app := fiber.New()
 	servers.New(testutil.Config).Register(app.Group("/api"))
 	return app
+}
+
+// clientIn connects a client for userID and puts it in each channel's room.
+func clientIn(t *testing.T, userID string, channelIDs ...string) *ws.Client {
+	t.Helper()
+	c := ws.NewTestClient(t, userID)
+	for _, ch := range channelIDs {
+		c.JoinRoomForTest(ch)
+	}
+	return c
 }
 
 func inviteCodeOf(t *testing.T, serverID string) string {
@@ -162,6 +173,7 @@ func TestJoinBanLookupErrorIsNotAJoin(t *testing.T) {
 func TestUpdateServerWriteErrorIs500(t *testing.T) {
 	testutil.SetupDB(t)
 	g := testutil.SeedGuild(t)
+	member := clientIn(t, g.Member)
 	testutil.FailOn("update", "servers", nil)
 
 	status, resp := testutil.Do(t, newApp(), "PUT", "/api/servers/"+g.ServerID, testutil.Token(t, g.Admin), map[string]any{"name": "renamed"})
@@ -173,6 +185,26 @@ func TestUpdateServerWriteErrorIs500(t *testing.T) {
 	database.DB.First(&s, "id = ?", g.ServerID)
 	if s.Name == "renamed" {
 		t.Fatal("name changed although the write failed")
+	}
+	if n := len(member.FramesForTest()["server_updated"]); n != 0 {
+		t.Fatalf("%d server_updated events after a failed update", n)
+	}
+}
+
+func TestUpdateServerNotifiesMembers(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	member, stranger := clientIn(t, g.Member), clientIn(t, g.Stranger)
+
+	if status, resp := testutil.Do(t, newApp(), "PUT", "/api/servers/"+g.ServerID, testutil.Token(t, g.Admin), map[string]any{"name": "renamed"}); status != 200 {
+		t.Fatalf("status %d (%s)", status, resp)
+	}
+
+	if ev := member.FramesForTest()["server_updated"]; len(ev) != 1 || ev[0]["name"] != "renamed" {
+		t.Fatalf("member's server_updated events = %v", ev)
+	}
+	if n := len(stranger.FramesForTest()["server_updated"]); n != 0 {
+		t.Fatalf("non-member got %d server_updated events", n)
 	}
 }
 
@@ -213,12 +245,16 @@ func TestDeleteServerFailureLeavesEverythingIntact(t *testing.T) {
 			testutil.SetupDB(t)
 			g := testutil.SeedGuild(t)
 			testutil.AddMessage(t, g.Open, g.Member, "hi")
+			member := clientIn(t, g.Member, g.Open)
 			c.fail()
 
 			status, resp := testutil.Do(t, newApp(), "DELETE", "/api/servers/"+g.ServerID, testutil.Token(t, g.Owner), nil)
 
 			if status != 500 {
 				t.Fatalf("status %d (%s), want 500", status, resp)
+			}
+			if !member.InRoomForTest(g.Open) || len(member.FramesForTest()["server_deleted"]) != 0 {
+				t.Fatal("clients were evicted or notified although the delete failed")
 			}
 			var servers, chans, members, msgs int64
 			database.DB.Model(&models.Server{}).Where("id = ?", g.ServerID).Count(&servers)
@@ -229,5 +265,38 @@ func TestDeleteServerFailureLeavesEverythingIntact(t *testing.T) {
 				t.Fatalf("after failed delete: %d servers, %d channels, %d members, %d messages", servers, chans, members, msgs)
 			}
 		})
+	}
+}
+
+func TestDeleteServerEvictsRoomsAndNotifiesMembers(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	member := clientIn(t, g.Member, g.Open, g.Announce)
+	mod := clientIn(t, g.Mod, g.Staff)
+	stranger := clientIn(t, g.Stranger)
+
+	if status, resp := testutil.Do(t, newApp(), "DELETE", "/api/servers/"+g.ServerID, testutil.Token(t, g.Owner), nil); status != 200 {
+		t.Fatalf("status %d (%s)", status, resp)
+	}
+
+	for name, c := range map[string]struct {
+		client   *ws.Client
+		channels []string
+	}{
+		"member": {member, []string{g.Open, g.Announce}},
+		"mod":    {mod, []string{g.Staff}},
+	} {
+		for _, ch := range c.channels {
+			if c.client.InRoomForTest(ch) {
+				t.Errorf("%s is still in the deleted server's room %s", name, ch)
+			}
+		}
+		ev := c.client.FramesForTest()["server_deleted"]
+		if len(ev) != 1 || ev[0]["server_id"] != g.ServerID {
+			t.Errorf("%s's server_deleted events = %v", name, ev)
+		}
+	}
+	if n := len(stranger.FramesForTest()["server_deleted"]); n != 0 {
+		t.Errorf("non-member got %d server_deleted events", n)
 	}
 }

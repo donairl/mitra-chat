@@ -9,7 +9,21 @@ import (
 	"mitrachat/server/internal/database"
 	"mitrachat/server/internal/models"
 	"mitrachat/server/internal/testutil"
+	"mitrachat/server/internal/ws"
 )
+
+// clientIn connects a client for userID and puts it in each channel's room.
+func clientIn(t *testing.T, userID string, channelIDs ...string) *ws.Client {
+	t.Helper()
+	c := ws.NewTestClient(t, userID)
+	for _, ch := range channelIDs {
+		c.JoinRoomForTest(ch)
+	}
+	return c
+}
+
+// changedCount is how many channels_changed events c has queued.
+func changedCount(c *ws.Client) int { return len(c.FramesForTest()["channels_changed"]) }
 
 func newApp() *fiber.App {
 	app := fiber.New()
@@ -147,6 +161,7 @@ func TestDeleteChannel(t *testing.T) {
 func TestUpdateChannelWriteErrorIs500(t *testing.T) {
 	testutil.SetupDB(t)
 	g := testutil.SeedGuild(t)
+	member := clientIn(t, g.Member, g.Open)
 	testutil.FailOn("update", "channels", nil)
 	lock := map[string]any{"name": "open", "min_view_role": "moderator", "min_post_role": "moderator"}
 
@@ -158,12 +173,16 @@ func TestUpdateChannelWriteErrorIs500(t *testing.T) {
 	if ch.MinViewRole != "member" {
 		t.Fatalf("min_view_role = %q after a failed update", ch.MinViewRole)
 	}
+	if n := changedCount(member); n != 0 {
+		t.Fatalf("%d channels_changed events after a failed update", n)
+	}
 }
 
 func TestDeleteChannelIsAtomic(t *testing.T) {
 	testutil.SetupDB(t)
 	g := testutil.SeedGuild(t)
 	testutil.AddMessage(t, g.Open, g.Member, "hi")
+	member := clientIn(t, g.Member, g.Open)
 	testutil.FailOn("delete", "channels", nil)
 
 	if status, body := testutil.Do(t, newApp(), "DELETE", "/api/channels/"+g.Open, testutil.Token(t, g.Admin), nil); status != 500 {
@@ -174,5 +193,81 @@ func TestDeleteChannelIsAtomic(t *testing.T) {
 	database.DB.Model(&models.Message{}).Where("channel_id = ?", g.Open).Count(&msgs)
 	if chans != 1 || msgs != 1 {
 		t.Fatalf("after failed delete: %d channels, %d messages, want 1 and 1", chans, msgs)
+	}
+	if !member.InRoomForTest(g.Open) || changedCount(member) != 0 {
+		t.Fatal("room was closed or members notified although the delete failed")
+	}
+}
+
+func TestUpdateChannelEvictsClientsWhoLoseAccess(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	app := newApp()
+	member := clientIn(t, g.Member, g.Open)
+	mod := clientIn(t, g.Mod, g.Open)
+	stranger := clientIn(t, g.Stranger)
+	put := func(body map[string]any) {
+		t.Helper()
+		if status, resp := testutil.Do(t, app, "PUT", "/api/channels/"+g.Open, testutil.Token(t, g.Admin), body); status != 200 {
+			t.Fatalf("status %d (%s)", status, resp)
+		}
+	}
+
+	// A rename changes no tier, so nobody is evicted, but members hear of it.
+	put(map[string]any{"name": "renamed"})
+	if !member.InRoomForTest(g.Open) || !mod.InRoomForTest(g.Open) {
+		t.Fatal("a rename evicted clients")
+	}
+	if changedCount(member) != 1 || changedCount(mod) != 1 || changedCount(stranger) != 0 {
+		t.Fatal("channels_changed was not delivered to exactly the server's members")
+	}
+
+	// Raising the view tier evicts those below it, and only them.
+	put(map[string]any{"name": "renamed", "min_view_role": "moderator", "min_post_role": "moderator"})
+	if member.InRoomForTest(g.Open) {
+		t.Error("member is still in a channel raised to moderator")
+	}
+	if !mod.InRoomForTest(g.Open) {
+		t.Error("moderator was evicted from a channel they can view")
+	}
+	if changedCount(member) != 1 || changedCount(mod) != 1 {
+		t.Error("channels_changed was not delivered after the tier change")
+	}
+}
+
+func TestDeleteChannelClosesRoomAndNotifies(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	member := clientIn(t, g.Member, g.Open, g.Announce)
+	mod := clientIn(t, g.Mod, g.Open)
+	stranger := clientIn(t, g.Stranger)
+
+	if status, body := testutil.Do(t, newApp(), "DELETE", "/api/channels/"+g.Open, testutil.Token(t, g.Admin), nil); status != 200 {
+		t.Fatalf("status %d (%s)", status, body)
+	}
+
+	if member.InRoomForTest(g.Open) || mod.InRoomForTest(g.Open) {
+		t.Error("clients are still in the deleted channel's room")
+	}
+	if !member.InRoomForTest(g.Announce) {
+		t.Error("deleting one channel evicted clients from another")
+	}
+	if changedCount(member) != 1 || changedCount(mod) != 1 || changedCount(stranger) != 0 {
+		t.Error("channels_changed was not delivered to exactly the server's members")
+	}
+}
+
+func TestCreateChannelNotifiesMembers(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	member, stranger := clientIn(t, g.Member), clientIn(t, g.Stranger)
+
+	body := map[string]any{"name": "new"}
+	if status, resp := testutil.Do(t, newApp(), "POST", "/api/servers/"+g.ServerID+"/channels", testutil.Token(t, g.Admin), body); status != 201 {
+		t.Fatalf("status %d (%s)", status, resp)
+	}
+
+	if changedCount(member) != 1 || changedCount(stranger) != 0 {
+		t.Fatal("channels_changed was not delivered to exactly the server's members")
 	}
 }
