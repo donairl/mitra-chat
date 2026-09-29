@@ -124,7 +124,10 @@ func AddMessage(t *testing.T, channelID, userID, content string) string {
 func RoleOf(t *testing.T, serverID, userID string) string {
 	t.Helper()
 	var m models.ServerMember
-	database.DB.Where("server_id = ? AND user_id = ?", serverID, userID).Limit(1).Find(&m)
+	res := database.DB.Where("server_id = ? AND user_id = ?", serverID, userID).Limit(1).Find(&m)
+	if res.Error != nil {
+		t.Fatalf("RoleOf: %v", res.Error)
+	}
 	return m.Role
 }
 
@@ -198,12 +201,13 @@ func Do(t *testing.T, app *fiber.App, method, path, token string, body any) (int
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := app.Test(req, -1)
+	resp, err := app.Test(req, 5000)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
+	out, err := io.ReadAll(resp.Body)
+	must(t, err)
 	return resp.StatusCode, out
 }
 
