@@ -3,6 +3,8 @@ package ws
 import (
 	"encoding/json"
 	"sync"
+
+	"mitrachat/server/internal/perms"
 )
 
 // Hub tracks connected clients, per-channel rooms, and per-user connections.
@@ -73,6 +75,11 @@ func (h *Hub) joinRoom(c *Client, channelID string) {
 func (h *Hub) leaveRoom(c *Client, channelID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.removeFromRoom(c, channelID)
+}
+
+// removeFromRoom drops c from a room. The caller must hold h.mu for writing.
+func (h *Hub) removeFromRoom(c *Client, channelID string) {
 	if h.rooms[channelID] != nil {
 		delete(h.rooms[channelID], c)
 		if len(h.rooms[channelID]) == 0 {
@@ -80,6 +87,63 @@ func (h *Hub) leaveRoom(c *Client, channelID string) {
 		}
 	}
 	delete(c.rooms, channelID)
+}
+
+// RecheckRooms removes each of userID's connections from every room the user
+// can no longer view. Access checks hit the database, so they run outside the lock.
+func (h *Hub) RecheckRooms(userID string) {
+	h.mu.RLock()
+	rooms := make(map[string]bool)
+	for c := range h.users[userID] {
+		for ch := range c.rooms {
+			rooms[ch] = true
+		}
+	}
+	h.mu.RUnlock()
+
+	for ch := range rooms {
+		if perms.ChannelAccess(ch, userID).CanView {
+			continue
+		}
+		h.mu.Lock()
+		for c := range h.users[userID] {
+			h.removeFromRoom(c, ch)
+		}
+		h.mu.Unlock()
+	}
+}
+
+// RecheckRoom re-validates every user currently in a room, e.g. after the
+// channel's tiers change.
+func (h *Hub) RecheckRoom(channelID string) {
+	for _, uid := range h.roomUsers(channelID) {
+		h.RecheckRooms(uid)
+	}
+}
+
+// roomUsers returns the ids of users with at least one connection in a room.
+func (h *Hub) roomUsers(channelID string) []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	seen := make(map[string]bool)
+	var ids []string
+	for c := range h.rooms[channelID] {
+		if !seen[c.userID] {
+			seen[c.userID] = true
+			ids = append(ids, c.userID)
+		}
+	}
+	return ids
+}
+
+// CloseRoom removes every client from a room (used when a channel is deleted).
+func (h *Hub) CloseRoom(channelID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.rooms[channelID] {
+		delete(c.rooms, channelID)
+	}
+	delete(h.rooms, channelID)
 }
 
 // BroadcastToChannel sends an event to every client in a channel room.
