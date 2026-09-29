@@ -2,10 +2,13 @@ package messages_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 
+	"mitrachat/server/internal/database"
 	"mitrachat/server/internal/messages"
+	"mitrachat/server/internal/models"
 	"mitrachat/server/internal/testutil"
 )
 
@@ -93,4 +96,38 @@ func TestEditNeedsPostRights(t *testing.T) {
 	if status, resp := testutil.Do(t, app, "PUT", "/api/messages/"+open, testutil.Token(t, g.Member), body); status != 200 {
 		t.Errorf("edit in open channel: %d (%s), want 200", status, resp)
 	}
+}
+
+func TestHistoryBeforeCursorIsScopedToChannel(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	app := newApp()
+	now := time.Now()
+	at := func(id string, ago time.Duration) string {
+		database.DB.Model(&models.Message{}).Where("id = ?", id).Update("created_at", now.Add(-ago))
+		return id
+	}
+	oldest := at(testutil.AddMessage(t, g.Open, g.Member, "oldest"), 3*time.Hour)
+	newest := at(testutil.AddMessage(t, g.Open, g.Member, "newest"), time.Hour)
+	hidden := at(testutil.AddMessage(t, g.Staff, g.Mod, "staff only"), 2*time.Hour)
+	history := func(before string) []string {
+		status, body := testutil.Do(t, app, "GET", "/api/channels/"+g.Open+"/messages?before="+before, testutil.Token(t, g.Member), nil)
+		if status != 200 {
+			t.Fatalf("status %d (%s)", status, body)
+		}
+		var msgs []models.Message
+		testutil.Decode(t, body, &msgs)
+		ids := make([]string, len(msgs))
+		for i, m := range msgs {
+			ids[i] = m.ID
+		}
+		return ids
+	}
+
+	// A cursor from the same channel pages back from that message.
+	testutil.SameIDs(t, history(newest), []string{oldest})
+	// A cursor from another channel is not a valid cursor here, so it must not
+	// leak that message's timestamp: it is ignored like an unknown id.
+	testutil.SameIDs(t, history(hidden), []string{oldest, newest})
+	testutil.SameIDs(t, history("no-such-message"), []string{oldest, newest})
 }

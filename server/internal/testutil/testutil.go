@@ -6,6 +6,7 @@ package testutil
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"path/filepath"
@@ -47,6 +48,35 @@ func SetupDB(t *testing.T) {
 			sqlDB.Close()
 		}
 	})
+}
+
+// ErrInjected is the error FailOn makes statements fail with.
+var ErrInjected = errors.New("testutil: injected database failure")
+
+// FailOn makes statements of kind op ("query", "create", "update" or "delete")
+// on table fail with ErrInjected, so tests can reach database error paths. When
+// only is non-nil, just the statements it accepts fail. It registers on the
+// current database.DB, so call it after SetupDB; a fresh test database drops it.
+func FailOn(op, table string, only func(tx *gorm.DB) bool) {
+	fail := func(tx *gorm.DB) {
+		if tx.Statement.Table == table && (only == nil || only(tx)) {
+			tx.AddError(ErrInjected)
+		}
+	}
+	name := "testutil:fail_" + op + "_" + table
+	cb := database.DB.Callback()
+	switch op {
+	case "query":
+		cb.Query().Before("gorm:query").Register(name, fail)
+	case "create":
+		cb.Create().Before("gorm:create").Register(name, fail)
+	case "update":
+		cb.Update().Before("gorm:update").Register(name, fail)
+	case "delete":
+		cb.Delete().Before("gorm:delete").Register(name, fail)
+	default:
+		panic("testutil: unknown FailOn op " + op)
+	}
 }
 
 func must(t *testing.T, err error) {

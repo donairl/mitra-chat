@@ -5,6 +5,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"mitrachat/server/internal/database"
 	"mitrachat/server/internal/models"
@@ -140,5 +141,93 @@ func TestRegenerateInvite(t *testing.T) {
 	testutil.Decode(t, body, &resp)
 	if resp.InviteCode == "" || resp.InviteCode == before || inviteCodeOf(t, g.ServerID) != resp.InviteCode {
 		t.Fatalf("invite code %q -> %q not stored", before, resp.InviteCode)
+	}
+}
+
+func TestJoinBanLookupErrorIsNotAJoin(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	database.DB.Create(&models.ServerBan{ID: uuid.NewString(), ServerID: g.ServerID, UserID: g.Stranger, BannedBy: g.Owner})
+	testutil.FailOn("query", "server_bans", nil)
+	body := map[string]any{"invite_code": inviteCodeOf(t, g.ServerID)}
+
+	if status, resp := testutil.Do(t, newApp(), "POST", "/api/servers/join", testutil.Token(t, g.Stranger), body); status != 500 {
+		t.Fatalf("status %d (%s), want 500", status, resp)
+	}
+	if role := testutil.RoleOf(t, g.ServerID, g.Stranger); role != "" {
+		t.Fatalf("banned user became %q when the ban lookup failed", role)
+	}
+}
+
+func TestUpdateServerWriteErrorIs500(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	testutil.FailOn("update", "servers", nil)
+
+	status, resp := testutil.Do(t, newApp(), "PUT", "/api/servers/"+g.ServerID, testutil.Token(t, g.Admin), map[string]any{"name": "renamed"})
+
+	if status != 500 {
+		t.Fatalf("status %d (%s), want 500", status, resp)
+	}
+	var s models.Server
+	database.DB.First(&s, "id = ?", g.ServerID)
+	if s.Name == "renamed" {
+		t.Fatal("name changed although the write failed")
+	}
+}
+
+func TestInviteWriteErrorIs500(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	database.DB.Model(&models.Server{}).Where("id = ?", g.ServerID).Update("invite_code", "")
+	testutil.FailOn("update", "servers", nil)
+
+	status, resp := testutil.Do(t, newApp(), "POST", "/api/servers/"+g.ServerID+"/invite", testutil.Token(t, g.Member), nil)
+
+	if status != 500 {
+		t.Fatalf("status %d (%s), want 500", status, resp)
+	}
+}
+
+func TestDeleteServerFailureLeavesEverythingIntact(t *testing.T) {
+	cases := []struct {
+		name string
+		fail func()
+	}{
+		{"member lookup fails", func() {
+			testutil.FailOn("query", "server_members", func(tx *gorm.DB) bool {
+				_, isPluck := tx.Statement.Dest.(*[]string)
+				return isPluck
+			})
+		}},
+		{"channel lookup fails", func() {
+			testutil.FailOn("query", "channels", func(tx *gorm.DB) bool {
+				_, isPluck := tx.Statement.Dest.(*[]string)
+				return isPluck
+			})
+		}},
+		{"server row delete fails", func() { testutil.FailOn("delete", "servers", nil) }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			testutil.SetupDB(t)
+			g := testutil.SeedGuild(t)
+			testutil.AddMessage(t, g.Open, g.Member, "hi")
+			c.fail()
+
+			status, resp := testutil.Do(t, newApp(), "DELETE", "/api/servers/"+g.ServerID, testutil.Token(t, g.Owner), nil)
+
+			if status != 500 {
+				t.Fatalf("status %d (%s), want 500", status, resp)
+			}
+			var servers, chans, members, msgs int64
+			database.DB.Model(&models.Server{}).Where("id = ?", g.ServerID).Count(&servers)
+			database.DB.Model(&models.Channel{}).Where("server_id = ?", g.ServerID).Count(&chans)
+			database.DB.Model(&models.ServerMember{}).Where("server_id = ?", g.ServerID).Count(&members)
+			database.DB.Model(&models.Message{}).Where("channel_id = ?", g.Open).Count(&msgs)
+			if servers != 1 || chans != 4 || members != 4 || msgs != 1 {
+				t.Fatalf("after failed delete: %d servers, %d channels, %d members, %d messages", servers, chans, members, msgs)
+			}
+		})
 	}
 }

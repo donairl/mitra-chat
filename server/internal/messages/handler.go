@@ -42,8 +42,10 @@ func (h *Handler) history(c *fiber.Ctx) error {
 	q := database.DB.Preload("User").Preload("Attachments").
 		Where("channel_id = ?", cid)
 	if page.Before != "" {
+		// The cursor must belong to this channel: a message id from a channel
+		// the caller cannot see would otherwise leak its timestamp.
 		var cursor models.Message
-		if database.DB.Select("created_at").First(&cursor, "id = ?", page.Before).Error == nil {
+		if database.DB.Select("created_at").First(&cursor, "id = ? AND channel_id = ?", page.Before, cid).Error == nil {
 			q = q.Where("created_at < ?", cursor.CreatedAt)
 		}
 	}

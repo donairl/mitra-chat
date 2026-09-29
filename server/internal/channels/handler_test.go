@@ -143,3 +143,36 @@ func TestDeleteChannel(t *testing.T) {
 		t.Fatalf("after delete: %d channels, %d messages remain", chans, msgs)
 	}
 }
+
+func TestUpdateChannelWriteErrorIs500(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	testutil.FailOn("update", "channels", nil)
+	lock := map[string]any{"name": "open", "min_view_role": "moderator", "min_post_role": "moderator"}
+
+	if status, body := testutil.Do(t, newApp(), "PUT", "/api/channels/"+g.Open, testutil.Token(t, g.Admin), lock); status != 500 {
+		t.Fatalf("status %d (%s), want 500", status, body)
+	}
+	var ch models.Channel
+	database.DB.First(&ch, "id = ?", g.Open)
+	if ch.MinViewRole != "member" {
+		t.Fatalf("min_view_role = %q after a failed update", ch.MinViewRole)
+	}
+}
+
+func TestDeleteChannelIsAtomic(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	testutil.AddMessage(t, g.Open, g.Member, "hi")
+	testutil.FailOn("delete", "channels", nil)
+
+	if status, body := testutil.Do(t, newApp(), "DELETE", "/api/channels/"+g.Open, testutil.Token(t, g.Admin), nil); status != 500 {
+		t.Fatalf("status %d (%s), want 500", status, body)
+	}
+	var chans, msgs int64
+	database.DB.Model(&models.Channel{}).Where("id = ?", g.Open).Count(&chans)
+	database.DB.Model(&models.Message{}).Where("channel_id = ?", g.Open).Count(&msgs)
+	if chans != 1 || msgs != 1 {
+		t.Fatalf("after failed delete: %d channels, %d messages, want 1 and 1", chans, msgs)
+	}
+}

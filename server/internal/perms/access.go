@@ -32,7 +32,9 @@ type Access struct {
 
 // ChannelAccess resolves userID's rights in a channel. DM channels (no server)
 // grant view and post to their participants only. Server channels compare the
-// caller's tier with the channel's MinViewRole and MinPostRole.
+// caller's tier with the channel's MinViewRole and MinPostRole. A channel tier
+// that does not parse (corrupt or hand-edited data) counts as Admin, the
+// highest valid channel tier, so bad data hides a channel rather than opening it.
 func ChannelAccess(channelID, userID string) Access {
 	var ch models.Channel
 	res := database.DB.Limit(1).Find(&ch, "id = ?", channelID)
@@ -54,8 +56,14 @@ func ChannelAccess(channelID, userID string) Access {
 		return a
 	}
 	a.Tier = t
-	view, _ := ParseTier(ch.MinViewRole)
-	post, _ := ParseTier(ch.MinPostRole)
+	view, ok := ParseTier(ch.MinViewRole)
+	if !ok {
+		view = Admin
+	}
+	post, ok := ParseTier(ch.MinPostRole)
+	if !ok {
+		post = Admin
+	}
 	a.CanView = t >= view
 	a.CanPost = a.CanView && t >= post
 	return a

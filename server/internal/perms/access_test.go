@@ -87,3 +87,31 @@ func TestVisibleChannels(t *testing.T) {
 	testutil.SameIDs(t, visible(Moderator), []string{g.Open, g.Announce, g.Staff})
 	testutil.SameIDs(t, visible(Admin), []string{g.Open, g.Announce, g.Staff, g.AdminOnly})
 }
+
+func TestChannelAccessUnknownTierFailsClosed(t *testing.T) {
+	testutil.SetupDB(t)
+	g := testutil.SeedGuild(t)
+	cases := []struct {
+		name, column string
+		user         string
+		view, post   bool
+	}{
+		{"unknown view tier hides from member", "min_view_role", g.Member, false, false},
+		{"unknown view tier hides from mod", "min_view_role", g.Mod, false, false},
+		{"unknown view tier admits admin", "min_view_role", g.Admin, true, true},
+		{"unknown view tier admits owner", "min_view_role", g.Owner, true, true},
+		{"unknown post tier is read-only for member", "min_post_role", g.Member, true, false},
+		{"unknown post tier is read-only for mod", "min_post_role", g.Mod, true, false},
+		{"unknown post tier lets admin post", "min_post_role", g.Admin, true, true},
+	}
+	for _, c := range cases {
+		ch := testutil.AddChannel(t, g.ServerID, "member", "member")
+		if err := database.DB.Model(&models.Channel{}).Where("id = ?", ch).Update(c.column, "vip").Error; err != nil {
+			t.Fatal(err)
+		}
+		a := ChannelAccess(ch, c.user)
+		if !a.Exists || a.CanView != c.view || a.CanPost != c.post {
+			t.Errorf("%s: got %+v, want view=%v post=%v", c.name, a, c.view, c.post)
+		}
+	}
+}

@@ -144,9 +144,11 @@ func (h *Handler) update(c *fiber.Ctx) error {
 		return utils.Error(c, fiber.StatusBadRequest, err.Error())
 	}
 	srv.Name, srv.Description, srv.Icon = req.Name, req.Description, req.Icon
-	database.DB.Model(&srv).Updates(map[string]any{
+	if err := database.DB.Model(&srv).Updates(map[string]any{
 		"name": req.Name, "description": req.Description, "icon": req.Icon,
-	})
+	}).Error; err != nil {
+		return utils.Error(c, fiber.StatusInternalServerError, "could not update server")
+	}
 	ws.SendToServerMembers(id, ws.Event("server_updated", srv))
 	return utils.OK(c, srv)
 }
@@ -160,11 +162,16 @@ func (h *Handler) delete(c *fiber.Ctx) error {
 	if err := database.DB.First(&srv, "id = ?", id).Error; err != nil {
 		return utils.Error(c, fiber.StatusNotFound, "server not found")
 	}
-	// Collect event recipients and rooms before the rows disappear.
+	// Collect event recipients and rooms inside the transaction, so they are
+	// exactly the rows it deletes, before those rows disappear.
 	var memberIDs, channelIDs []string
-	database.DB.Model(&models.ServerMember{}).Where("server_id = ?", id).Pluck("user_id", &memberIDs)
-	database.DB.Model(&models.Channel{}).Where("server_id = ?", id).Pluck("id", &channelIDs)
 	err := database.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.ServerMember{}).Where("server_id = ?", id).Pluck("user_id", &memberIDs).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.Channel{}).Where("server_id = ?", id).Pluck("id", &channelIDs).Error; err != nil {
+			return err
+		}
 		if len(channelIDs) > 0 {
 			if err := tx.Where("channel_id IN ?", channelIDs).Delete(&models.Message{}).Error; err != nil {
 				return err
@@ -201,7 +208,9 @@ func (h *Handler) invite(c *fiber.Ctx) error {
 	}
 	if srv.InviteCode == "" {
 		srv.InviteCode = inviteCode()
-		database.DB.Model(&srv).Update("invite_code", srv.InviteCode)
+		if err := database.DB.Model(&srv).Update("invite_code", srv.InviteCode).Error; err != nil {
+			return utils.Error(c, fiber.StatusInternalServerError, "could not create invite")
+		}
 	}
 	return utils.OK(c, fiber.Map{"invite_code": srv.InviteCode})
 }
@@ -241,7 +250,12 @@ func (h *Handler) join(c *fiber.Ctx) error {
 	t, isMember := perms.MemberTier(srv.ID, uid)
 	if !isMember {
 		var bans int64
-		database.DB.Model(&models.ServerBan{}).Where("server_id = ? AND user_id = ?", srv.ID, uid).Count(&bans)
+		// If the ban lookup fails, refuse: guessing "not banned" would let a
+		// banned user back in.
+		if err := database.DB.Model(&models.ServerBan{}).
+			Where("server_id = ? AND user_id = ?", srv.ID, uid).Count(&bans).Error; err != nil {
+			return utils.Error(c, fiber.StatusInternalServerError, "could not join server")
+		}
 		if bans > 0 {
 			return utils.Error(c, fiber.StatusForbidden, "banned from server")
 		}

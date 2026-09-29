@@ -150,9 +150,11 @@ func (h *Handler) update(c *fiber.Ctx) error {
 		return utils.Error(c, fiber.StatusBadRequest, msg)
 	}
 	ch.Name, ch.Topic, ch.MinViewRole, ch.MinPostRole = req.Name, req.Topic, view, post
-	database.DB.Model(&ch).Updates(map[string]any{
+	if err := database.DB.Model(&ch).Updates(map[string]any{
 		"name": ch.Name, "topic": ch.Topic, "min_view_role": view, "min_post_role": post,
-	})
+	}).Error; err != nil {
+		return utils.Error(c, fiber.StatusInternalServerError, "could not update channel")
+	}
 	ws.H.RecheckRoom(ch.ID)
 	channelsChanged(ch.ServerID)
 	return utils.OK(c, ch)
@@ -163,8 +165,15 @@ func (h *Handler) delete(c *fiber.Ctx) error {
 	if status != 0 {
 		return utils.Error(c, status, msg)
 	}
-	database.DB.Where("channel_id = ?", ch.ID).Delete(&models.Message{})
-	database.DB.Delete(&ch)
+	err := database.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("channel_id = ?", ch.ID).Delete(&models.Message{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&ch).Error
+	})
+	if err != nil {
+		return utils.Error(c, fiber.StatusInternalServerError, "could not delete channel")
+	}
 	ws.H.CloseRoom(ch.ID)
 	channelsChanged(ch.ServerID)
 	return utils.OK(c, fiber.Map{"message": "channel deleted"})
