@@ -12,6 +12,10 @@ A Discord-like real-time chat app. **Vue 3 + TypeScript + Tailwind v4** frontend
 - File attachments (images inline, others as links; 10MB limit)
 - Friends: search, request, accept/reject, remove, online presence
 - Notifications with unread badge, pushed live
+- Roles: owner > admin > moderator > member. Moderators kick/ban and delete any
+  message; admins manage channels, server settings, and member roles
+- Private and read-only channels via per-channel "who can view" / "who can post"
+- Leave server; banned users cannot rejoin until unbanned
 
 ## Run
 
@@ -32,7 +36,8 @@ npm run dev                 # http://localhost:5173 (proxies /api and /ws to :30
 ```
 
 ## Verify
-- `cd server && go build ./...`
+- `cd server && go build ./... && go test ./...`
+- `cd client && npx vitest run`
 - `cd client && npm run type-check && npm run build`
 - REST + WebSocket smoke tests pass (auth → server → channel → realtime message → friends).
 
@@ -42,5 +47,8 @@ npm run dev                 # http://localhost:5173 (proxies /api and /ws to :30
   `middleware`, `config`, `utils`.
 - WebSocket owns message persistence + broadcast (`ws.CreateAndBroadcast` etc.);
   HTTP message/attachment handlers reuse those helpers, so both paths stay consistent.
+- `server/internal/perms` is the single authorization point (role tiers,
+  capability matrix, channel access). HTTP handlers and WebSocket events both
+  call it; the hub drops users from rooms when they lose access.
 - Frontend: Pinia stores per domain, `ws/socket.ts` (auto-reconnect + event bus),
   axios client with JWT interceptor.
