@@ -90,7 +90,8 @@ function setRole(m: ServerMember, role: Role) {
             <button
               v-if="canActOn(servers.myRole, m.role)"
               @click="menuFor = menuFor === m.user_id ? '' : m.user_id"
-              class="ml-auto hidden px-1 text-txt-muted hover:text-white group-hover:block"
+              class="ml-auto px-1 text-txt-muted opacity-0 hover:text-white focus:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+              :aria-label="`Actions for ${m.user?.username}`"
               title="Member actions"
             >
               ⋯

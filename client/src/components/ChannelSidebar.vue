@@ -111,7 +111,8 @@ async function leave() {
         <button
           v-if="canManageChannels"
           @click="editing = c"
-          class="mr-1 hidden px-1 text-sm text-txt-muted hover:text-white group-hover:block"
+          class="mr-1 hidden px-1 text-sm text-txt-muted hover:text-white group-hover:block group-focus-within:block [@media(hover:none)]:block"
+          :aria-label="`Edit #${c.name}`"
           title="Edit channel"
         >
           ⚙
