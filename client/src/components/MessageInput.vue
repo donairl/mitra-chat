@@ -1,11 +1,22 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useMessagesStore } from '@/stores/messages'
+import { useServersStore } from '@/stores/servers'
 import { attachmentApi } from '@/api'
+import { canPost } from '@/permissions'
 import type { Channel, Attachment } from '@/types'
 
 const props = defineProps<{ channel: Channel }>()
 const messages = useMessagesStore()
+const servers = useServersStore()
+
+// False in channels whose post tier is above the viewer's role (e.g. announcements).
+const allowed = computed(() => canPost(servers.myRole, props.channel))
+const placeholder = computed(() =>
+  allowed.value
+    ? `Message #${props.channel.name}`
+    : "You don't have permission to post in this channel",
+)
 
 const text = ref('')
 const pending = ref<Attachment[]>([])
@@ -39,7 +50,7 @@ async function pickFile(e: Event) {
 
 async function send() {
   const content = text.value.trim()
-  if (!content && pending.value.length === 0) return
+  if (!allowed.value || (!content && pending.value.length === 0)) return
   await messages.send(content, pending.value.map((a) => a.id))
   text.value = ''
   pending.value = []
@@ -61,8 +72,13 @@ async function send() {
       </div>
     </div>
 
-    <div class="flex items-end gap-2 rounded-lg bg-bg-input px-3 py-2">
-      <button @click="fileInput?.click()" class="text-xl text-txt-muted hover:text-white" title="Attach">
+    <div :class="['flex items-end gap-2 rounded-lg bg-bg-input px-3 py-2', allowed ? '' : 'opacity-60']">
+      <button
+        v-if="allowed"
+        @click="fileInput?.click()"
+        class="text-xl text-txt-muted hover:text-white"
+        title="Attach"
+      >
         ＋
       </button>
       <input ref="fileInput" type="file" class="hidden" @change="pickFile" />
@@ -70,11 +86,12 @@ async function send() {
         v-model="text"
         @input="onInput"
         @keydown.enter.exact.prevent="send"
-        :placeholder="`Message #${channel.name}`"
+        :placeholder="placeholder"
+        :disabled="!allowed"
         rows="1"
-        class="max-h-40 flex-1 resize-none bg-transparent text-txt outline-none placeholder:text-txt-muted"
+        class="max-h-40 flex-1 resize-none bg-transparent text-txt outline-none placeholder:text-txt-muted disabled:cursor-not-allowed"
       ></textarea>
-      <button @click="send" class="font-medium text-blurple hover:text-white">Send</button>
+      <button v-if="allowed" @click="send" class="font-medium text-blurple hover:text-white">Send</button>
     </div>
   </div>
 </template>

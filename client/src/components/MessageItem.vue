@@ -2,13 +2,28 @@
 import { ref, computed } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useMessagesStore } from '@/stores/messages'
+import { useServersStore } from '@/stores/servers'
+import { useChannelsStore } from '@/stores/channels'
+import { can, canPost } from '@/permissions'
 import type { Message } from '@/types'
 
 const props = defineProps<{ message: Message; prev?: Message }>()
 const auth = useAuthStore()
 const messages = useMessagesStore()
+const servers = useServersStore()
+const channels = useChannelsStore()
 
 const isOwn = computed(() => props.message.user_id === auth.user?.id)
+// The server channel this message is in; undefined for DMs.
+const serverChannel = computed(() => channels.channels.find((c) => c.id === props.message.channel_id))
+// Authors edit their own messages while they may still post in the channel.
+const canEdit = computed(
+  () => isOwn.value && (!serverChannel.value || canPost(servers.myRole, serverChannel.value)),
+)
+// Authors delete their own; moderators and up delete anyone's in server channels.
+const canDelete = computed(
+  () => isOwn.value || (!!serverChannel.value && can(servers.myRole, 'deleteAnyMessage')),
+)
 const grouped = computed(
   () =>
     props.prev?.user_id === props.message.user_id &&
@@ -30,6 +45,10 @@ function startEdit() {
 function saveEdit() {
   if (draft.value.trim()) messages.edit(props.message.id, draft.value.trim())
   editing.value = false
+}
+function remove() {
+  if (!isOwn.value && !window.confirm(`Delete this message by ${props.message.user?.username}?`)) return
+  messages.remove(props.message.id)
 }
 function isImage(t: string) {
   return t?.startsWith('image/')
@@ -85,11 +104,11 @@ function isImage(t: string) {
     </div>
 
     <div
-      v-if="isOwn && !editing"
+      v-if="(canEdit || canDelete) && !editing"
       class="absolute right-2 top-0 hidden gap-2 rounded bg-bg-dark px-2 py-1 text-xs text-txt-muted group-hover:flex"
     >
-      <button @click="startEdit" class="hover:text-white">Edit</button>
-      <button @click="messages.remove(message.id)" class="hover:text-red-400">Delete</button>
+      <button v-if="canEdit" @click="startEdit" class="hover:text-white">Edit</button>
+      <button v-if="canDelete" @click="remove" class="hover:text-red-400">Delete</button>
     </div>
   </div>
 </template>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, ref, computed, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useServersStore } from '@/stores/servers'
 import { useChannelsStore } from '@/stores/channels'
@@ -42,6 +42,8 @@ onMounted(async () => {
 
 async function selectServer(id: string) {
   mode.value = 'server'
+  // Clear first so the channel-list watcher ignores the previous server's channel.
+  channels.currentChannelId = ''
   await Promise.all([servers.selectServer(id), channels.fetch(id)])
   const first = channels.channels.find((c) => c.type === 'text')
   if (first) openChannel(first.id)
@@ -71,6 +73,27 @@ async function openDm(userId: string) {
   const ch = await dm.open(userId)
   openDmChannel(ch.id)
 }
+
+// The selected server went away (left, kicked, banned, deleted): go home.
+watch(
+  () => servers.currentServerId,
+  (id) => {
+    if (!id && mode.value === 'server') goHome()
+  },
+)
+
+// The channel list was refetched (tier change, deletion, demotion). If the open
+// channel is no longer visible, move to the first text channel we can see.
+watch(
+  () => channels.channels,
+  (list) => {
+    if (mode.value !== 'server' || !channels.currentChannelId) return
+    if (list.some((c) => c.id === channels.currentChannelId)) return
+    const first = list.find((c) => c.type === 'text')
+    if (first) openChannel(first.id)
+    else channels.currentChannelId = ''
+  },
+)
 </script>
 
 <template>
@@ -118,6 +141,13 @@ async function openDm(userId: string) {
     </aside>
 
     <main class="flex min-w-0 flex-1 flex-col bg-bg">
+      <div
+        v-if="servers.notice"
+        class="flex items-center justify-between bg-red-500/20 px-4 py-2 text-sm text-red-200"
+      >
+        <span>{{ servers.notice }}</span>
+        <button class="ml-4 text-red-200 hover:text-white" @click="servers.notice = ''">✕</button>
+      </div>
       <header class="flex h-12 items-center justify-between border-b border-black/20 px-4">
         <div class="truncate font-semibold text-white">
           <span v-if="mode === 'server' && currentChannel">#{{ currentChannel.name }}</span>
