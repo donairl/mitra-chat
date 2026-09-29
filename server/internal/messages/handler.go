@@ -10,6 +10,7 @@ import (
 	"mitrachat/server/internal/database"
 	"mitrachat/server/internal/middleware"
 	"mitrachat/server/internal/models"
+	"mitrachat/server/internal/perms"
 	"mitrachat/server/internal/utils"
 	"mitrachat/server/internal/ws"
 )
@@ -31,25 +32,11 @@ func (h *Handler) Register(r fiber.Router) {
 	r.Delete("/messages/:id", p, h.delete)
 }
 
-// canAccessChannel checks the user may access a channel: either a member of the
-// channel's server, or a participant of the channel (for DM channels).
-func canAccessChannel(channelID, userID string) bool {
-	var n int64
-	database.DB.Model(&models.Channel{}).
-		Joins("JOIN server_members sm ON sm.server_id = channels.server_id").
-		Where("channels.id = ? AND sm.user_id = ?", channelID, userID).Count(&n)
-	if n > 0 {
-		return true
-	}
-	database.DB.Model(&models.ChannelMember{}).
-		Where("channel_id = ? AND user_id = ?", channelID, userID).Count(&n)
-	return n > 0
-}
-
 func (h *Handler) history(c *fiber.Ctx) error {
 	cid := c.Params("channelId")
-	if !canAccessChannel(cid, middleware.UserID(c)) {
-		return utils.Error(c, fiber.StatusForbidden, "no access to channel")
+	// Hidden and missing channels look the same, so ids cannot be probed.
+	if !perms.ChannelAccess(cid, middleware.UserID(c)).CanView {
+		return utils.Error(c, fiber.StatusNotFound, "channel not found")
 	}
 	page := utils.ParsePagination(c)
 	q := database.DB.Preload("User").Preload("Attachments").
@@ -84,8 +71,12 @@ func (h *Handler) send(c *fiber.Ctx) error {
 		return utils.Error(c, fiber.StatusBadRequest, err.Error())
 	}
 	uid := middleware.UserID(c)
-	if !canAccessChannel(req.ChannelID, uid) {
-		return utils.Error(c, fiber.StatusForbidden, "no access to channel")
+	a := perms.ChannelAccess(req.ChannelID, uid)
+	if !a.CanView {
+		return utils.Error(c, fiber.StatusNotFound, "channel not found")
+	}
+	if !a.CanPost {
+		return utils.Error(c, fiber.StatusForbidden, "insufficient permissions")
 	}
 	if req.Content == "" && len(req.AttachmentIDs) == 0 {
 		return utils.Error(c, fiber.StatusBadRequest, "empty message")
@@ -111,21 +102,22 @@ func (h *Handler) edit(c *fiber.Ctx) error {
 	}
 	msg, err := ws.EditAndBroadcast(middleware.UserID(c), c.Params("id"), req.Content)
 	if err != nil {
-		if errors.Is(err, ws.ErrForbidden) {
-			return utils.Error(c, fiber.StatusForbidden, "not your message")
-		}
-		return utils.Error(c, fiber.StatusNotFound, "message not found")
+		return messageError(c, err)
 	}
 	return utils.OK(c, msg)
 }
 
 func (h *Handler) delete(c *fiber.Ctx) error {
-	err := ws.DeleteAndBroadcast(middleware.UserID(c), c.Params("id"))
-	if err != nil {
-		if errors.Is(err, ws.ErrForbidden) {
-			return utils.Error(c, fiber.StatusForbidden, "not your message")
-		}
-		return utils.Error(c, fiber.StatusNotFound, "message not found")
+	if err := ws.DeleteAndBroadcast(middleware.UserID(c), c.Params("id")); err != nil {
+		return messageError(c, err)
 	}
 	return utils.OK(c, fiber.Map{"message": "deleted"})
+}
+
+// messageError maps ws edit/delete errors to HTTP responses.
+func messageError(c *fiber.Ctx, err error) error {
+	if errors.Is(err, ws.ErrForbidden) {
+		return utils.Error(c, fiber.StatusForbidden, "insufficient permissions")
+	}
+	return utils.Error(c, fiber.StatusNotFound, "message not found")
 }
