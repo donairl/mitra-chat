@@ -36,18 +36,21 @@ func Connect(cfg *config.Config) error {
 	}
 	DB = db
 
-	if err := migrate(); err != nil {
+	if err := Migrate(); err != nil {
 		return err
 	}
 	log.Printf("database connected (%s)", cfg.DBDriver)
 	return nil
 }
 
-func migrate() error {
+// Migrate creates or updates tables for every model. Exported so tests can
+// migrate their own database.
+func Migrate() error {
 	return DB.AutoMigrate(
 		&models.User{},
 		&models.Server{},
 		&models.ServerMember{},
+		&models.ServerBan{},
 		&models.Channel{},
 		&models.ChannelMember{},
 		&models.Message{},
