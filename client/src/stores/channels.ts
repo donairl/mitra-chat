@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { channelApi } from '@/api'
+import { channelApi, type ChannelBody } from '@/api'
 import type { Channel } from '@/types'
 
 // Channels store: channels for the active server plus the currently selected channel.
+// The list comes from the server already filtered to what the user may view.
 export const useChannelsStore = defineStore('channels', () => {
   const channels = ref<Channel[]>([])
   const currentChannelId = ref<string>('')
@@ -13,9 +14,17 @@ export const useChannelsStore = defineStore('channels', () => {
     channels.value = data
   }
 
-  async function create(serverId: string, b: { name: string; type?: string; topic?: string }) {
+  async function create(serverId: string, b: ChannelBody) {
     const { data } = await channelApi.create(serverId, b)
-    channels.value.push(data)
+    // A channels_changed refetch may have added it already.
+    if (!channels.value.some((c) => c.id === data.id)) channels.value.push(data)
+    return data
+  }
+
+  async function update(id: string, b: ChannelBody) {
+    const { data } = await channelApi.update(id, b)
+    const i = channels.value.findIndex((c) => c.id === id)
+    if (i !== -1) channels.value[i] = data
     return data
   }
 
@@ -28,5 +37,5 @@ export const useChannelsStore = defineStore('channels', () => {
     currentChannelId.value = id
   }
 
-  return { channels, currentChannelId, fetch, create, remove, select }
+  return { channels, currentChannelId, fetch, create, update, remove, select }
 })

@@ -5,11 +5,23 @@ import type {
   FriendRequest,
   Message,
   Notification,
+  Role,
   Server,
+  ServerBan,
   ServerMember,
   User,
   Attachment,
 } from '@/types'
+
+// Body for creating or editing a channel. Omitted tiers keep their current
+// value on edit and default to 'member' on create.
+export type ChannelBody = {
+  name: string
+  type?: string
+  topic?: string
+  min_view_role?: Role
+  min_post_role?: Role
+}
 
 export const authApi = {
   register: (b: { username: string; email: string; password: string }) =>
@@ -25,18 +37,28 @@ export const serverApi = {
   create: (b: { name: string; description?: string; icon?: string }) =>
     client.post<Server>('/servers', b),
   get: (id: string) => client.get<Server>(`/servers/${id}`),
-  update: (id: string, b: object) => client.put<Server>(`/servers/${id}`, b),
+  update: (id: string, b: { name: string; description?: string; icon?: string }) =>
+    client.put<Server>(`/servers/${id}`, b),
   remove: (id: string) => client.delete(`/servers/${id}`),
   invite: (id: string) => client.post<{ invite_code: string }>(`/servers/${id}/invite`),
+  regenerateInvite: (id: string) =>
+    client.post<{ invite_code: string }>(`/servers/${id}/invite/regenerate`),
   join: (invite_code: string) => client.post<Server>('/servers/join', { invite_code }),
   members: (id: string) => client.get<ServerMember[]>(`/servers/${id}/members`),
+  leave: (id: string) => client.delete(`/servers/${id}/members/me`),
+  kick: (id: string, userId: string) => client.delete(`/servers/${id}/members/${userId}`),
+  setRole: (id: string, userId: string, role: Role) =>
+    client.put(`/servers/${id}/members/${userId}/role`, { role }),
+  bans: (id: string) => client.get<ServerBan[]>(`/servers/${id}/bans`),
+  ban: (id: string, user_id: string) => client.post<ServerBan>(`/servers/${id}/bans`, { user_id }),
+  unban: (id: string, userId: string) => client.delete(`/servers/${id}/bans/${userId}`),
 }
 
 export const channelApi = {
   list: (serverId: string) => client.get<Channel[]>(`/servers/${serverId}/channels`),
-  create: (serverId: string, b: { name: string; type?: string; topic?: string }) =>
+  create: (serverId: string, b: ChannelBody) =>
     client.post<Channel>(`/servers/${serverId}/channels`, b),
-  update: (id: string, b: object) => client.put<Channel>(`/channels/${id}`, b),
+  update: (id: string, b: ChannelBody) => client.put<Channel>(`/channels/${id}`, b),
   remove: (id: string) => client.delete(`/channels/${id}`),
   dmList: () => client.get<Channel[]>('/channels/dm'),
   dmOpen: (user_id: string) => client.post<Channel>('/channels/dm', { user_id }),

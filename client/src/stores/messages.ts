@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { messageApi } from '@/api'
 import { socket } from '@/ws/socket'
+import { useServersStore } from '@/stores/servers'
+import { useChannelsStore } from '@/stores/channels'
 import type { Message } from '@/types'
 
 // Messages store: message list for the open channel, infinite-scroll pagination,
@@ -40,9 +42,21 @@ export const useMessagesStore = defineStore('messages', () => {
       if (data.length < 50) hasMore.value = false // short page => no older history left
       // Prepend the older page ahead of what we already have (keeps ascending order).
       messages.value = [...data, ...messages.value]
+    } catch (e: any) {
+      const status = e.response?.status
+      if (status !== 403 && status !== 404) throw e
+      hasMore.value = false
+      refreshChannels()
     } finally {
       loading.value = false
     }
+  }
+
+  // The server says we can no longer see the open channel. Refetch the channel
+  // list so the dashboard can move us to one we can see.
+  function refreshChannels() {
+    const servers = useServersStore()
+    if (servers.currentServerId) useChannelsStore().fetch(servers.currentServerId)
   }
 
   // Mutations go over the socket (not REST); the server echoes them back via the
@@ -87,6 +101,11 @@ export const useMessagesStore = defineStore('messages', () => {
     socket.on('message_deleted', (p: any) => {
       if (p.channel_id !== channelId.value) return
       messages.value = messages.value.filter((x) => x.id !== p.message_id)
+    })
+    socket.on('error', (p: { code: string; channel_id?: string }) => {
+      if (p.code === 'not_found' && p.channel_id && p.channel_id === channelId.value) {
+        refreshChannels()
+      }
     })
     const startTyping = (p: any) => {
       if (p.channel_id !== channelId.value) return

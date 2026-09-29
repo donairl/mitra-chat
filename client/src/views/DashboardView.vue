@@ -35,6 +35,7 @@ onMounted(async () => {
   messages.wire()
   friends.wire()
   notifications.wire()
+  servers.wire()
   if (!auth.user) await auth.fetchMe()
   await Promise.all([servers.fetch(), friends.fetch(), dm.fetch(), notifications.fetch()])
 })
