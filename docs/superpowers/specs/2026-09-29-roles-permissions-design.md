@@ -146,14 +146,17 @@ func ParseTier(role string) (Tier, bool)
 func (t Tier) String() string
 func MemberTier(serverID, userID string) (Tier, bool)   // false = not a member
 func ChannelAccess(channelID, userID string) Access
-func VisibleChannels(serverID string, t Tier) *gorm.DB  // query scoped to channels with rank(min_view_role) <= t
+func VisibleChannels(t Tier) func(*gorm.DB) *gorm.DB     // GORM scope: rank(min_view_role) <= t, oldest first
 func Can(t Tier, c Capability) bool
 func CanActOn(actor, target Tier) bool                  // actor > target
+func CanAssign(actor, role Tier) bool                   // role < actor && role != Owner
+func ValidChannelTier(t Tier) bool                      // member..admin
+func TiersUpTo(t Tier) []string                         // role names ranked <= t
 ```
 
-`VisibleChannels` filters with `min_view_role IN ?`, passing the role strings whose
-rank is at most `t` (for example `["member","moderator"]` for a moderator). Ranks are
-never computed in SQL.
+`VisibleChannels` is a scope usable with `Scopes(...)` and as a `Preload` condition.
+It filters with `min_view_role IN ?`, passing `TiersUpTo(t)` (for example
+`["member","moderator"]` for a moderator). Ranks are never computed in SQL.
 
 Remove the duplicated `isMember`/`isOwner` helpers in `servers` and `channels` and
 `canAccessChannel` in `messages`; call `perms` instead.
@@ -228,9 +231,10 @@ No database call runs while the hub lock is held.
 Callers:
 
 - Kick, ban, leave, role change: `RecheckRooms(targetUserID)`.
-- Channel tier change: `RecheckRooms` for every user currently in that room.
-- Channel delete: remove all clients from the room directly (new
-  `h.closeRoom(channelID)`).
+- Channel tier change: `H.RecheckRoom(channelID)`, which runs `RecheckRooms` for
+  every user currently in that room.
+- Channel delete: remove all clients from the room directly
+  (`H.CloseRoom(channelID)`).
 
 A banned user's socket stays open, because the JWT is only checked at connect time.
 They lose all rooms in that server, and every later `join_room` fails the check.
@@ -338,12 +342,13 @@ The server has no Go tests yet. Add minimal infrastructure:
 
 - Export the migration: rename `database.migrate()` to `database.Migrate()` so
   tests can reuse the model list.
-- `internal/testutil`: open an in-memory SQLite database (one per test, via a unique
-  `file:<name>?mode=memory&cache=shared` DSN), assign `database.DB`, call
-  `database.Migrate()`, and provide seed helpers:
-  `SeedUser(name) string`, `SeedServer(ownerID) string`,
-  `AddMember(serverID, userID, role)`, `AddChannel(serverID, view, post) string`,
-  `AddDM(userA, userB) string`.
+- `internal/testutil`: open a fresh SQLite file in `t.TempDir()` per test (a real
+  file avoids shared-cache locking quirks of in-memory SQLite), assign
+  `database.DB`, call `database.Migrate()`, and provide seed helpers
+  (`SeedUser`, `SeedServer`, `AddMember`, `AddChannel`, `AddDM`, `AddMessage`,
+  and `SeedGuild`: one user per role plus an outsider, with open, read-only,
+  staff, and admin-only channels) and HTTP helpers (`Token`, `Do`, `Decode`).
+  It imports no handler packages, so internal tests can use it without cycles.
 - `perms` table-driven unit tests: tier parsing and ranks, the full `Can` matrix,
   `CanActOn`, `ChannelAccess` for each tier × channel tier combination plus DM
   participant, DM outsider, and non-member, and `VisibleChannels` filtering.
