@@ -41,6 +41,9 @@ func (h *Handler) Register(r fiber.Router) {
 	g.Delete("/:id/members/me", h.leave)
 	g.Delete("/:id/members/:userId", h.kick)
 	g.Put("/:id/members/:userId/role", h.setRole)
+	g.Get("/:id/bans", h.listBans)
+	g.Post("/:id/bans", h.ban)
+	g.Delete("/:id/bans/:userId", h.unban)
 }
 
 // require checks that userID is a member of serverID holding need. It returns
