@@ -10,7 +10,9 @@ import (
 	"mitrachat/server/internal/database"
 	"mitrachat/server/internal/middleware"
 	"mitrachat/server/internal/models"
+	"mitrachat/server/internal/perms"
 	"mitrachat/server/internal/utils"
+	"mitrachat/server/internal/ws"
 )
 
 var validate = validator.New()
@@ -32,40 +34,61 @@ func (h *Handler) Register(r fiber.Router) {
 	r.Delete("/channels/:id", p, h.delete)
 }
 
-func isMember(serverID, userID string) bool {
-	var n int64
-	database.DB.Model(&models.ServerMember{}).
-		Where("server_id = ? AND user_id = ?", serverID, userID).Count(&n)
-	return n > 0
-}
-
-func isOwner(serverID, userID string) bool {
-	var n int64
-	database.DB.Model(&models.Server{}).
-		Where("id = ? AND owner_id = ?", serverID, userID).Count(&n)
-	return n > 0
-}
-
+// list returns the server's channels the caller's tier may view.
 func (h *Handler) list(c *fiber.Ctx) error {
 	sid := c.Params("serverId")
-	if !isMember(sid, middleware.UserID(c)) {
+	t, ok := perms.MemberTier(sid, middleware.UserID(c))
+	if !ok {
 		return utils.Error(c, fiber.StatusForbidden, "not a member")
 	}
 	var chans []models.Channel
-	database.DB.Where("server_id = ?", sid).Order("created_at asc").Find(&chans)
+	database.DB.Scopes(perms.VisibleChannels(t)).Where("server_id = ?", sid).Find(&chans)
 	return utils.OK(c, chans)
 }
 
 type channelReq struct {
-	Name  string `json:"name" validate:"required,min=1,max=100"`
-	Type  string `json:"type" validate:"omitempty,oneof=text voice"`
-	Topic string `json:"topic" validate:"max=1024"`
+	Name        string `json:"name" validate:"required,min=1,max=100"`
+	Type        string `json:"type" validate:"omitempty,oneof=text voice"`
+	Topic       string `json:"topic" validate:"max=1024"`
+	MinViewRole string `json:"min_view_role"`
+	MinPostRole string `json:"min_post_role"`
+}
+
+// resolveTiers fills empty view/post roles from the current values and checks
+// the pair. It returns a client-facing message when the pair is invalid.
+func resolveTiers(view, post, curView, curPost string) (string, string, string) {
+	if view == "" {
+		view = curView
+	}
+	if post == "" {
+		post = curPost
+	}
+	v, okV := perms.ParseTier(view)
+	p, okP := perms.ParseTier(post)
+	if !okV || !okP || !perms.ValidChannelTier(v) || !perms.ValidChannelTier(p) {
+		return "", "", "invalid role"
+	}
+	if p < v {
+		return "", "", "post role must be at least view role"
+	}
+	return view, post, ""
+}
+
+// channelsChanged tells a server's members to refetch their channel list. The
+// refetch is tier-filtered, so private channel names never reach users who
+// cannot view them.
+func channelsChanged(serverID string) {
+	ws.SendToServerMembers(serverID, ws.Event("channels_changed", fiber.Map{"server_id": serverID}))
 }
 
 func (h *Handler) create(c *fiber.Ctx) error {
 	sid := c.Params("serverId")
-	if !isMember(sid, middleware.UserID(c)) {
+	t, ok := perms.MemberTier(sid, middleware.UserID(c))
+	if !ok {
 		return utils.Error(c, fiber.StatusForbidden, "not a member")
+	}
+	if !perms.Can(t, perms.CapManageChannels) {
+		return utils.Error(c, fiber.StatusForbidden, "insufficient permissions")
 	}
 	var req channelReq
 	if err := c.BodyParser(&req); err != nil {
@@ -77,23 +100,43 @@ func (h *Handler) create(c *fiber.Ctx) error {
 	if req.Type == "" {
 		req.Type = "text"
 	}
+	view, post, msg := resolveTiers(req.MinViewRole, req.MinPostRole, "member", "member")
+	if msg != "" {
+		return utils.Error(c, fiber.StatusBadRequest, msg)
+	}
 	ch := models.Channel{
 		ID: uuid.NewString(), Name: req.Name, Type: req.Type,
-		Topic: req.Topic, ServerID: sid,
+		Topic: req.Topic, ServerID: sid, MinViewRole: view, MinPostRole: post,
 	}
 	if err := database.DB.Create(&ch).Error; err != nil {
 		return utils.Error(c, fiber.StatusInternalServerError, "could not create channel")
 	}
+	channelsChanged(sid)
 	return c.Status(fiber.StatusCreated).JSON(ch)
 }
 
-func (h *Handler) update(c *fiber.Ctx) error {
+// managedChannel loads the :id channel for an edit or delete. It returns a
+// non-zero HTTP status and message when the caller may not manage it: 404 when
+// they cannot see it, 403 for DM channels or without CapManageChannels.
+func managedChannel(c *fiber.Ctx) (models.Channel, int, string) {
 	var ch models.Channel
 	if err := database.DB.First(&ch, "id = ?", c.Params("id")).Error; err != nil {
-		return utils.Error(c, fiber.StatusNotFound, "channel not found")
+		return ch, fiber.StatusNotFound, "channel not found"
 	}
-	if !isOwner(ch.ServerID, middleware.UserID(c)) {
-		return utils.Error(c, fiber.StatusForbidden, "owner only")
+	a := perms.ChannelAccess(ch.ID, middleware.UserID(c))
+	if !a.CanView {
+		return ch, fiber.StatusNotFound, "channel not found"
+	}
+	if ch.ServerID == "" || !perms.Can(a.Tier, perms.CapManageChannels) {
+		return ch, fiber.StatusForbidden, "insufficient permissions"
+	}
+	return ch, 0, ""
+}
+
+func (h *Handler) update(c *fiber.Ctx) error {
+	ch, status, msg := managedChannel(c)
+	if status != 0 {
+		return utils.Error(c, status, msg)
 	}
 	var req channelReq
 	if err := c.BodyParser(&req); err != nil {
@@ -102,20 +145,28 @@ func (h *Handler) update(c *fiber.Ctx) error {
 	if err := validate.Struct(req); err != nil {
 		return utils.Error(c, fiber.StatusBadRequest, err.Error())
 	}
-	database.DB.Model(&ch).Updates(map[string]any{"name": req.Name, "topic": req.Topic})
+	view, post, msg := resolveTiers(req.MinViewRole, req.MinPostRole, ch.MinViewRole, ch.MinPostRole)
+	if msg != "" {
+		return utils.Error(c, fiber.StatusBadRequest, msg)
+	}
+	ch.Name, ch.Topic, ch.MinViewRole, ch.MinPostRole = req.Name, req.Topic, view, post
+	database.DB.Model(&ch).Updates(map[string]any{
+		"name": ch.Name, "topic": ch.Topic, "min_view_role": view, "min_post_role": post,
+	})
+	ws.H.RecheckRoom(ch.ID)
+	channelsChanged(ch.ServerID)
 	return utils.OK(c, ch)
 }
 
 func (h *Handler) delete(c *fiber.Ctx) error {
-	var ch models.Channel
-	if err := database.DB.First(&ch, "id = ?", c.Params("id")).Error; err != nil {
-		return utils.Error(c, fiber.StatusNotFound, "channel not found")
-	}
-	if !isOwner(ch.ServerID, middleware.UserID(c)) {
-		return utils.Error(c, fiber.StatusForbidden, "owner only")
+	ch, status, msg := managedChannel(c)
+	if status != 0 {
+		return utils.Error(c, status, msg)
 	}
 	database.DB.Where("channel_id = ?", ch.ID).Delete(&models.Message{})
 	database.DB.Delete(&ch)
+	ws.H.CloseRoom(ch.ID)
+	channelsChanged(ch.ServerID)
 	return utils.OK(c, fiber.Map{"message": "channel deleted"})
 }
 
