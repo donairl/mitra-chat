@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { apiError } from '@/api'
 import { useServersStore } from '@/stores/servers'
 import { useChannelsStore } from '@/stores/channels'
 import { useAuthStore } from '@/stores/auth'
@@ -40,8 +41,8 @@ async function leave() {
   if (!server.value || !window.confirm(`Leave ${server.value.name}?`)) return
   try {
     await servers.leave(server.value.id)
-  } catch (e: any) {
-    alert(e.response?.data?.error || 'Could not leave server')
+  } catch (e: unknown) {
+    alert(apiError(e, 'Could not leave server'))
   }
 }
 </script>

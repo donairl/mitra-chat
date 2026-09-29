@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { serverApi } from '@/api'
+import { apiStatus, safeRefetch, serverApi } from '@/api'
 import { socket } from '@/ws/socket'
 import { useAuthStore } from '@/stores/auth'
 import { useChannelsStore } from '@/stores/channels'
@@ -18,6 +18,7 @@ export const useServersStore = defineStore('servers', () => {
   // One-line message for the dashboard banner, e.g. "You were kicked from X."
   const notice = ref('')
   let wired = false // one-time guard so socket handlers register only once
+  let membersSeq = 0 // only the latest members load may write, so a slow older one is dropped
 
   // The current user's role in the selected server (undefined until members load).
   const myRole = computed<Role | undefined>(
@@ -63,9 +64,45 @@ export const useServersStore = defineStore('servers', () => {
 
   // Switch active server and load its members.
   async function selectServer(id: string) {
+    // Clear so role gating never uses the previous server's members while loading.
+    if (currentServerId.value !== id) members.value = []
     currentServerId.value = id
-    const { data } = await serverApi.members(id)
-    members.value = data
+    await loadMembers(id)
+  }
+
+  // Load the members of `id`. The result is dropped if a newer load started or the
+  // selection moved on. A 403/404 means we are no longer in that server.
+  async function loadMembers(id: string) {
+    const seq = ++membersSeq
+    try {
+      const { data } = await serverApi.members(id)
+      if (seq === membersSeq && id === currentServerId.value) members.value = data
+    } catch (e) {
+      if (seq !== membersSeq || id !== currentServerId.value) return
+      const status = apiStatus(e)
+      if (status !== 403 && status !== 404) throw e
+      lostAccess(id)
+    }
+  }
+
+  // We are no longer in this server and never got the removal event: say so and drop it.
+  function lostAccess(id: string, name = servers.value.find((s) => s.id === id)?.name) {
+    notice.value = `You no longer have access to ${name ?? 'a server'}.`
+    dropServer(id)
+  }
+
+  // After a socket reconnect, membership and channel events may have been missed.
+  // Reload the server list plus the selected server's members and channels.
+  async function resync() {
+    const id = currentServerId.value
+    const name = servers.value.find((s) => s.id === id)?.name
+    await fetch()
+    if (!id || id !== currentServerId.value) return
+    if (!servers.value.some((s) => s.id === id)) {
+      lostAccess(id, name)
+      return
+    }
+    await Promise.all([loadMembers(id), channels.fetch(id)])
   }
 
   async function remove(id: string) {
@@ -149,16 +186,20 @@ export const useServersStore = defineStore('servers', () => {
       const m = members.value.find((x) => x.user_id === p.user_id)
       if (m) m.role = p.role
       // My role changed: the set of channels I may see may have changed too.
-      if (p.user_id === auth.user?.id) channels.fetch(p.server_id)
+      if (p.user_id === auth.user?.id) safeRefetch(channels.fetch(p.server_id))
     })
     socket.on('channels_changed', (p: { server_id: string }) => {
-      if (p.server_id === currentServerId.value) channels.fetch(p.server_id)
+      if (p.server_id === currentServerId.value) safeRefetch(channels.fetch(p.server_id))
     })
     socket.on('server_updated', (p: Server) => patchServer(p))
     socket.on('server_deleted', (p: { server_id: string }) => {
       const s = servers.value.find((x) => x.id === p.server_id)
       if (s && s.owner_id !== auth.user?.id) notice.value = `${s.name} was deleted.`
       dropServer(p.server_id)
+    })
+    // Events sent while we were disconnected are lost, so reload after a reconnect.
+    socket.on('_open', (p: { reconnect: boolean }) => {
+      if (p.reconnect) safeRefetch(resync())
     })
   }
 

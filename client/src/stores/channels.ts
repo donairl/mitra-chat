@@ -8,10 +8,14 @@ import type { Channel } from '@/types'
 export const useChannelsStore = defineStore('channels', () => {
   const channels = ref<Channel[]>([])
   const currentChannelId = ref<string>('')
+  let fetchSeq = 0 // only the latest fetch may write, so a slow older response is dropped
 
+  // Returns the fetched list even when a newer fetch superseded it.
   async function fetch(serverId: string) {
+    const seq = ++fetchSeq
     const { data } = await channelApi.list(serverId)
-    channels.value = data
+    if (seq === fetchSeq) channels.value = data
+    return data
   }
 
   async function create(serverId: string, b: ChannelBody) {

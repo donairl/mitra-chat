@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref, computed, watch } from 'vue'
+import { safeRefetch } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { useServersStore } from '@/stores/servers'
 import { useChannelsStore } from '@/stores/channels'
@@ -40,12 +41,18 @@ onMounted(async () => {
   await Promise.all([servers.fetch(), friends.fetch(), dm.fetch(), notifications.fetch()])
 })
 
-async function selectServer(id: string) {
+function selectServer(id: string) {
   mode.value = 'server'
   // Clear first so the channel-list watcher ignores the previous server's channel.
   channels.currentChannelId = ''
-  await Promise.all([servers.selectServer(id), channels.fetch(id)])
-  const first = channels.channels.find((c) => c.type === 'text')
+  safeRefetch(loadServer(id))
+}
+
+async function loadServer(id: string) {
+  const [, list] = await Promise.all([servers.selectServer(id), channels.fetch(id)])
+  // Another server was picked (or this one was dropped) while we loaded.
+  if (servers.currentServerId !== id) return
+  const first = list.find((c) => c.type === 'text')
   if (first) openChannel(first.id)
 }
 
@@ -57,7 +64,7 @@ function goHome() {
 
 function openChannel(id: string) {
   channels.select(id)
-  messages.open(id)
+  safeRefetch(messages.open(id))
 }
 
 function showFriends() {
@@ -66,7 +73,7 @@ function showFriends() {
 
 function openDmChannel(id: string) {
   homeView.value = id
-  messages.open(id)
+  safeRefetch(messages.open(id))
 }
 
 async function openDm(userId: string) {

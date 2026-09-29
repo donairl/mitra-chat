@@ -8,10 +8,12 @@ class Socket {
   private handlers = new Map<string, Set<Handler>>()
   private backoff = 1000 // reconnect delay (ms), doubles per failed attempt
   private closed = false // true only on intentional disconnect; suppresses reconnect
+  private opened = false // true once this session has connected, so later opens are reconnects
 
   connect(token: string) {
     this.token = token
     this.closed = false
+    this.opened = false
     this.open()
   }
 
@@ -21,7 +23,9 @@ class Socket {
 
     this.ws.onopen = () => {
       this.backoff = 1000 // reset backoff after a successful connection
-      this.emit('_open', null) // let stores re-join rooms / re-sync
+      // Let stores re-join rooms / re-sync. `reconnect` is false for the first open.
+      this.emit('_open', { reconnect: this.opened })
+      this.opened = true
     }
     this.ws.onmessage = (ev) => {
       try {
@@ -39,10 +43,11 @@ class Socket {
     }
   }
 
-  send(type: string, payload: object) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type, payload }))
-    }
+  // Returns false when the socket is not open and the frame was dropped.
+  send(type: string, payload: object): boolean {
+    if (this.ws?.readyState !== WebSocket.OPEN) return false
+    this.ws.send(JSON.stringify({ type, payload }))
+    return true
   }
 
   on(type: string, handler: Handler) {

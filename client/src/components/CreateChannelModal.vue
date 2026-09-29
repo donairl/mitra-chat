@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { apiError } from '@/api'
 import { useChannelsStore } from '@/stores/channels'
 import { CHANNEL_ROLES, rank } from '@/permissions'
 import type { Channel, Role } from '@/types'
@@ -40,8 +41,8 @@ async function submit() {
     if (props.channel) await channels.update(props.channel.id, body)
     else await channels.create(props.serverId, body)
     emit('close')
-  } catch (e: any) {
-    error.value = e.response?.data?.error || 'Failed'
+  } catch (e: unknown) {
+    error.value = apiError(e, 'Failed')
   }
 }
 
@@ -51,8 +52,8 @@ async function remove() {
   try {
     await channels.remove(props.channel.id)
     emit('close')
-  } catch (e: any) {
-    error.value = e.response?.data?.error || 'Failed'
+  } catch (e: unknown) {
+    error.value = apiError(e, 'Failed')
   }
 }
 </script>

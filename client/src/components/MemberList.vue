@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { apiError } from '@/api'
 import { useServersStore } from '@/stores/servers'
 import { useFriendsStore } from '@/stores/friends'
 import { assignableRoles, can, canActOn } from '@/permissions'
@@ -40,8 +41,8 @@ async function run(action: () => Promise<unknown>) {
   menuFor.value = ''
   try {
     await action()
-  } catch (e: any) {
-    error.value = e.response?.data?.error || 'Action failed'
+  } catch (e: unknown) {
+    error.value = apiError(e, 'Action failed')
   }
 }
 

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { apiError } from '@/api'
 import { useServersStore } from '@/stores/servers'
 import { can } from '@/permissions'
 import type { Server, ServerBan } from '@/types'
@@ -27,8 +28,8 @@ const bans = ref<ServerBan[]>([])
 const error = ref('')
 const saved = ref(false)
 
-function fail(e: any, fallback: string) {
-  error.value = e.response?.data?.error || fallback
+function fail(e: unknown, fallback: string) {
+  error.value = apiError(e, fallback)
 }
 
 onMounted(async () => {

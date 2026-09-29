@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { messageApi } from '@/api'
+import { apiStatus, messageApi, safeRefetch } from '@/api'
 import { socket } from '@/ws/socket'
 import { useServersStore } from '@/stores/servers'
 import { useChannelsStore } from '@/stores/channels'
@@ -42,8 +42,8 @@ export const useMessagesStore = defineStore('messages', () => {
       if (data.length < 50) hasMore.value = false // short page => no older history left
       // Prepend the older page ahead of what we already have (keeps ascending order).
       messages.value = [...data, ...messages.value]
-    } catch (e: any) {
-      const status = e.response?.status
+    } catch (e: unknown) {
+      const status = apiStatus(e)
       if (status !== 403 && status !== 404) throw e
       hasMore.value = false
       refreshChannels()
@@ -56,7 +56,7 @@ export const useMessagesStore = defineStore('messages', () => {
   // list so the dashboard can move us to one we can see.
   function refreshChannels() {
     const servers = useServersStore()
-    if (servers.currentServerId) useChannelsStore().fetch(servers.currentServerId)
+    if (servers.currentServerId) safeRefetch(useChannelsStore().fetch(servers.currentServerId))
   }
 
   // Mutations go over the socket (not REST); the server echoes them back via the
@@ -106,6 +106,10 @@ export const useMessagesStore = defineStore('messages', () => {
       if (p.code === 'not_found' && p.channel_id && p.channel_id === channelId.value) {
         refreshChannels()
       }
+    })
+    // A new connection has no rooms, so join the open channel again.
+    socket.on('_open', () => {
+      if (channelId.value) socket.send('join_room', { channel_id: channelId.value })
     })
     const startTyping = (p: any) => {
       if (p.channel_id !== channelId.value) return

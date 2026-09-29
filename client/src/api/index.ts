@@ -1,4 +1,5 @@
 // Typed REST endpoint wrappers, grouped by resource, over the shared axios client.
+import axios from 'axios'
 import client from './client'
 import type {
   Channel,
@@ -21,6 +22,28 @@ export type ChannelBody = {
   topic?: string
   min_view_role?: Role
   min_post_role?: Role
+}
+
+// The server's `{"error": "..."}` message from a failed request, or `fallback`
+// for network errors and anything that is not an HTTP error response.
+export function apiError(e: unknown, fallback = 'Something went wrong'): string {
+  return (axios.isAxiosError<{ error?: string }>(e) && e.response?.data?.error) || fallback
+}
+
+// HTTP status of a failed request; undefined for network errors.
+export function apiStatus(e: unknown): number | undefined {
+  return axios.isAxiosError(e) ? e.response?.status : undefined
+}
+
+// Fire-and-forget wrapper for refetches started from socket handlers and
+// watchers. A 403/404 means we lost access; the member_removed and channel
+// handlers reconcile that. Anything else is logged, never left unhandled.
+export function safeRefetch(p: Promise<unknown>): void {
+  p.catch((e) => {
+    const status = apiStatus(e)
+    if (status !== 403 && status !== 404)
+      console.warn('refetch failed:', apiError(e, 'network error'))
+  })
 }
 
 export const authApi = {
